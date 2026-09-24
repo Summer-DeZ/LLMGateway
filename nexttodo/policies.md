@@ -225,8 +225,12 @@ struct AttemptUsage {
 中止一个正在进行的尝试时，按下面的顺序处理，不能直接 `close()`：
 
 1. `shutdown(SHUT_WR)`：上游立刻看到 FIN，llama.cpp 的 `is_connection_closed` 随即成立并中止任务。**取消延迟以这一步为准**。
-2. 非阻塞地把 socket 里已经到达的字节全部读出（直到 `EAGAIN`，上限 1MB），只喂给 SSE 解析器和 UsageMeter，不转发。
+2. 非阻塞地把 socket 里已经到达的字节全部读出（直到 `EAGAIN`，上限 1MB），不转发。
    背压暂停期间内核缓冲里可能积了不少数据，这一步把它们里面最新的累计计数取出来。
+   这一步在 loop 线程里同步完成，**不能逐事件解析 JSON**：1MB 约有几千个事件，逐个解析会把整个 loop 卡住几十毫秒到数秒
+   （Debug/asan 下更久；本 loop 落后后，其他流的上游缓冲又积满，形成连锁，2026-09-25 压测中实际出现过）。
+   计数都是累计值（`timings`、`usage`、`prompt_progress`），所以只扫描 SSE 分帧、记下最后一个 JSON 事件，排空结束后只把它交给 UsageMeter。
+   G14 接 Anthropic 上游时注意：`message_start`（输入/缓存）与 `message_delta`（输出）是不同事件，两类各取最后一个。
 3. `close()`。
 
 这样记下的 `completion` 是**上游最后发出的那个 chunk 里的累计值**，是上游自己报告的精确数。

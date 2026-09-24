@@ -92,6 +92,7 @@ public:
 ```
 
 `TcpConnection` 只和 `Transport` 打交道，唯一实现 `PlainTransport` 就是 `Buffer::readFd` 与 `::write`。
+**fd 的所有权属于 Transport**：`PlainTransport` 析构时 `close(fd)`，连接对象析构（handleClose 之后的下一轮）才真正关闭 fd。
 保留这层接口还是直接在 `TcpConnection` 里读写 fd，由实现者决定。
 
 已有代码里为 TLS 写的部分随之删除：`net/tls.{hpp,cpp}`、`TlsContext`/`TlsTransport`、`Transport` 的
@@ -100,7 +101,7 @@ public:
 
 ## 7. TcpConnection
 
-状态：`kConnected → kDisconnecting → kDisconnected`（服务端连接与上游连接都在 fd 就绪后直接从 kConnected 开始）。
+状态：`kConnecting → kConnected → kDisconnecting → kDisconnected`。`kConnecting` 只存在于构造之后、`connectEstablished()` 之前；没有握手阶段。
 
 ```cpp
 class TcpConnection : noncopyable, public std::enable_shared_from_this<TcpConnection> {
@@ -204,7 +205,7 @@ struct AcquireError { enum Kind { resolve, connect_refused, connect_timeout, can
 class UpstreamPool : noncopyable {
 public:
     UpstreamPool(EventLoop*, Resolver&, PoolOptions);
-    // 回调在本 loop 上执行，且保证一定回调一次（成功、失败或 cancelled）；返回的连接处于 kConnected
+    // 回调在本 loop 上执行；未取消的 acquire 恰好回调一次（成功或失败），AcquireHandle::cancel() 之后不再保证回调；返回的连接处于 kConnected
     std::shared_ptr<AcquireHandle> acquire(const UpstreamKey&, std::chrono::milliseconds connect_timeout,
         std::function<void(std::expected<Lease, AcquireError>)> cb);
     void release(Lease);              // 仅在连接可复用时调用，否则 lease 析构时直接关闭

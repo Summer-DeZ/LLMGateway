@@ -20,7 +20,7 @@ flowchart LR
 | G04 | HTTP 服务端、配置加载、main、`/healthz` | 真实验收通过 | G03 |
 | G05 | 上游客户端：Resolver / Connector / 响应解析 / chunked / 连接池 | 真实验收通过 | G04 |
 | G06 | OpenAI 透传代理（非流式 + 流式）、鉴权、路由、SSE | 真实验收通过 | G05 |
-| G07 | 背压、取消传播、超时（含 2026-09-25 审查返工） | 实施中 | G06 |
+| G07 | 背压、取消传播、超时（含 2026-09-25 审查返工） | 真实验收通过 | G06 |
 | G09 | 可观测性：记录、访问日志、指标、成本、admin 接口 | 未开始 | G07 |
 | G10 | 限流 | 未开始 | G09 |
 | G11 | 用量账本（PostgreSQL）与配额（Redis）、流式超额截断 | 未开始 | G10 + 容器已启动 |
@@ -193,6 +193,7 @@ curl -s $GW/v1/chat/completions -H "$AUTH" -H "$JSON" \
 #### G07 返工（2026-09-25 审查）
 
 首次提交的 G07 被审查退回。下面每一项都是规格已锁定、但实现不符的地方，修完后按"返工验收"重新验收，状态才能再改为"真实验收通过"。
+第 1–15 项已于 2026-09-25 全部修复并验收（第 6 项的真实复现按计划放到 G12），结果见执行记录"G07 返工"。
 
 | # | 问题 | 现状（代码位置） | 要求（规格位置） |
 | --- | --- | --- | --- |
@@ -203,10 +204,14 @@ curl -s $GW/v1/chat/completions -H "$AUTH" -H "$JSON" \
 | 5 | 超时结束尝试没有排空 | ttft / idle / precommit / 提交后中断经 `failAttempt`/`failCommitted` → `finish` → `forceClose` | 统一用 `abortAndDrain()` 结束当前尝试（[proxy-session.md §5.2](proxy-session.md#52-各状态下的动作) 末段） |
 | 6 | 复用连接的竞态没处理 | `Lease.reused` 只被设置，没人用 | `reused` 连接在收到任何响应字节前失败 → 新建连接重发一次，不计尝试、不计熔断（[net-reactor.md §11](net-reactor.md#11-upstreampoolgw_http每-loop-一个)） |
 | 7 | `/v1/messages` 走进 OpenAI 路径 | Router 把 Anthropic 请求体按 OpenAI 解析并转发到 `/chat/completions` | G14 之前按未知路径返回 404（Anthropic 格式错误体） |
-| 8 | 删除 TLS | `net/tls`、`TlsContext`、Transport 的 TLS 钩子、`kHandshaking`、连接池 https 分支、配置 `tls` 段仍在；连接池里握手失败时 acquire 永不回调且连接自持引用泄漏 | 按 [net-reactor.md §6](net-reactor.md#6-传输层) 删除；`https://` 的 `base_url` 配置加载报错（[http.md §9](http.md#9-url)）；连接池保证每次 acquire 恰好回调一次 |
+| 8 | 删除 TLS | `net/tls`、`TlsContext`、Transport 的 TLS 钩子、`kHandshaking`、连接池 https 分支、配置 `tls` 段仍在；连接池里握手失败时 acquire 永不回调且连接自持引用泄漏 | 按 [net-reactor.md §6](net-reactor.md#6-传输层) 删除；`https://` 的 `base_url` 配置加载报错（[http.md §9](http.md#9-url)）；连接池保证未取消的 acquire 恰好回调一次 |
 | 9 | 下游 `SO_SNDBUF` 写死在 TcpServer | `tcp_server.cpp` 对所有连接设 64KB，net 层带了网关策略 | 改为 `HttpServerOptions` 选项，由配置 `stream.downstream_sndbuf_bytes`（默认 65536，0 表示不设置）传入（[policies.md §5](policies.md#5-配置-homegatewayjson)） |
 | 10 | 执行记录前后矛盾 | G07 记录"偏离"写 `ttft_ms=1000`、第 7 项写 2000；"单测现有 54 例"与 71 例不符；asan 结果 `result_asan.txt`（23:41:04）早于最后一次代码修改（23:41:34） | 返工完成后重写 G07 记录，所有数字来自同一轮最终代码的运行 |
 | 11 | 可执行文件位置不符 | 产物在 `build/<preset>/src/`，验收脚本也按这个路径写死 | 按 §2 统一输出到 `build/<preset>/`（设 `CMAKE_RUNTIME_OUTPUT_DIRECTORY`），脚本随之改 |
+| 12 | 连接 fd 从不关闭（返工中发现） | `PlainTransport` 与 `TcpConnection` 都不 `close(fd)`，`forceClose` 只是移出 epoll；每个连接泄漏一个 fd，下游停在 CLOSE-WAIT，上游只靠 `SHUT_WR` 才让对端看到断开 | Transport 持有 fd、析构时关闭（[net-reactor.md §6](net-reactor.md#6-传输层)） |
+| 13 | 排空逐事件解析 JSON 卡住 loop（返工中发现） | 取消时同步排空最多 1MB，每个 SSE 事件都解析 JSON；asan 压测下单次排空数十秒，同 loop 其他流的上游缓冲随之积满，形成连锁，loop 数分钟不处理新连接 | 只扫描分帧、取最后一个 JSON 事件计量（[policies.md §4.5](policies.md#45-取消时拿到最后的精确计数)） |
+| 14 | 退出时 handler 已析构仍被调用（返工中发现） | `~HttpServer` 先销毁各 handler 成员、后销毁 TcpServer；`main` 里 Router 先于 HttpServer 析构，而 TcpServer 析构时 io loop 仍会对剩余连接回调 `onConnection` → Router | 先停 io 线程再析构 handler 所引用的对象（`HttpServer::stop()`） |
+| 15 | 写下游失败时同步关闭导致重入（返工中发现） | `sendInLoop` 写失败时同步 `handleClose`，调用方正处在上游 SSE 解析回调里，close 回调 → `cancel()` → 排空再次喂同一个 SSE 解析器 | 写失败只标记并 `queueInLoop(handleClose)`，之后的发送直接丢弃 |
 
 返工验收（配置仍放 `temp/G07/`，证据按项存档；原 7 项全部在最终代码上重跑）：
 
@@ -452,6 +457,30 @@ POST /v1/chat/completions                        → 无故障，正常输出
 所有解析器类单测都必须包含"逐字节喂入与整段喂入结果一致"的用例。
 
 ## 6. 执行记录
+
+### G07 返工（2026-09-25）
+- 完成内容：返工清单第 1–15 项。
+  - net：`handleClose` 把连接析构推迟到本轮事件之后；写失败只标记并延后关闭；`PlainTransport` 持有并关闭 fd；删除 TLS（`net/tls`、握手状态、Transport 的 TLS 钩子）。
+  - http：连接池去掉 https 分支，新连接直接交付 Lease（不再自持回调），`acquire(..., allow_idle)`；`HttpServer::stop()`/`forEachConnection()`；下游 `SO_SNDBUF` 改为 `stream.downstream_sndbuf_bytes`；`https://` 的 base_url 配置报错。
+  - gateway：stall 先 finish 再关下游；背压暂停时停 idle；超时/中断统一 `abortUpstream()` 排空计量，排空只解析最后一个事件；复用连接首字节前失败换新连接重发一次；`/v1/messages` 在 G14 前 404；`Router::cancelAll`。
+  - app：退出轮询改为 `runEvery`；drain 超时先 `cancelAll` 再退出；先 `server.stop()` 再析构 Router；可执行文件输出到 `build/<preset>/`。
+- 构建：dev / asan / tsan 成功，无警告。
+- 单测：73/73（新增 `ConfigTest.HttpsUpstreamRejected`、`ConfigTest.DownstreamSendBuffer`；url_test 改为只接受 http）；dev、asan 通过，tsan 通过。
+- 真实验收（Qwen3.6 :10010，最终代码；脚本 `temp/G07/rework.py`、`temp/G07/rework/stuck_probe.py`、`temp/G07/run.py`，输出在 `temp/G07/rework/final_*.out`）：
+  1) 原 7 项全部重跑通过（`final_original.out`）：背压 pause=23/resume=12、暂停期间脚本自动采到上游 Recv-Q=122841、RSS 6.9MB 平稳；stall 25s 结束；流式取消 completion=362 = 客户端最后 predicted_n，cancel_latency_us=48；预填充取消 prompt=82683/computed=4096/completion=0；建连取消 rejected；ttft 504；进度保活 200（38.0s）。
+  2) stall 记录 `outcome=downstream_stalled`（修复前为 cancelled）；默认值 `stall_ms = idle_ms = 60000` 的慢读者 64s 后 `downstream_stalled`（修复前为 stream_interrupted），另按 5000/5000 等比缩小再验一次，结果相同。
+  3) 暂停不触发 idle：`idle_ms=3000`、`stall_ms=60000`，客户端停读 20 秒后继续 → `outcome=ok`、收到 `[DONE]`（比规格的 idle 5000 / 暂停 10s 更严）。
+  4) 预填充取消：debug 日志逐次打出 progress computed=0/2048/4096，最后一次 4096 与记录的 `prompt_computed_tokens` 相等。
+  5) 优雅退出：流式请求进行中 SIGTERM → 流正常结束（有 `[DONE]`），进程在流结束后 50ms 内退出，退出码 0。
+  6) `POST /v1/messages` → 404；`https://` 上游 → 启动失败并指出上游名。
+  7) asan 取消压力：32 并发长输出流 × 10 轮、每个在 1–3 秒内随机被杀 → sanitizer 报告 0；每轮后 8 个新连接 `/healthz` 全部 200（覆盖全部 io loop）；打开的 fd 始终 24（修复前每轮 +72）；退出 58ms。
+  8) asan 下重跑场景 1、3、5 与 stall：均通过，sanitizer 报告 0。asan 下取消的记录 completion=637 而客户端只收到 predicted_n=99，是 asan 版本转发慢、差额停在上游 socket 里被排空计入，符合"≥ 客户端值、多出的是排空读到的量"。
+- 返工中新发现并修复的问题（第 12–15 项）：连接 fd 从不关闭；排空逐事件解析 JSON 在 asan 压测下把 loop 卡住数分钟（每轮一个 loop 停止处理新连接）；退出时已析构的 handler 被 io 线程回调；写下游失败同步关闭导致重入 SSE 解析器。
+- 偏离规格之处及原因：
+  - 下游 `SO_SNDBUF` 默认 64KB（可配置）：不限制时内核发送缓冲自动增长，用户态高水位很难触发，背压不可观测。
+  - 验收地址：connect 超时用 10.77.77.1（本机透明代理会立即"连上"10.255.255.1）。
+  - 第 6 项（复用连接首字节前失败重发）的真实复现放到 G12，用 fault_upstream 的 `close_before_head` 验证。
+- 遗留项与下一任务：G09。
 
 ### 范围调整与 G07 审查（2026-09-25）
 - 范围：项目只做本地，删除 DeepSeek 上游与 `smart` 模型，原 G08（TLS）移出范围、编号不复用；`final` 计量的本地验证改用 `qwen36-final`（同一个 llama-server，按 final 计量），相关验收挪到 G09。

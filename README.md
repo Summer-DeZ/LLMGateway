@@ -4,8 +4,7 @@
 
 只接本机的明文 HTTP 上游（Qwen3.6、Qwen3.8、fault_upstream），不接远端/云端模型，不实现 TLS。
 
-当前里程碑：G00–G06 真实验收通过（Reactor、TCP、HTTP、上游客户端、OpenAI 透传代理）；
-G07（背压/取消/超时）审查后返工中，见 `nexttodo/implementation-tasks.md` 的 G07 返工清单。
+当前里程碑：**G00–G07 真实验收通过**（Reactor、TCP、HTTP、上游客户端、OpenAI 透传代理、背压/取消/超时，G07 含 2026-09-25 审查返工）。
 G09–G15（可观测性、限流、账本与配额、重试熔断、缓存、协议转换、DAgent 对接与压测）待推进；原 G08（TLS）已移出范围。
 
 ## 架构
@@ -31,9 +30,9 @@ app ──► gateway ──► http ──► net ──► base
 ## 构建
 
 ```bash
-sudo apt install -y libssl-dev libpq-dev        # 首次
+sudo apt install -y libssl-dev libpq-dev        # 首次（libssl-dev 只为 libcrypto 的 SHA-256）
 cmake --preset dev && cmake --build --preset dev -j
-ctest --preset dev --output-on-failure          # 单测（gtest，54 例）
+ctest --preset dev --output-on-failure          # 单测（gtest，73 例）
 ```
 
 预设：`dev` / `release` / `asan` / `tsan`（aarch64 下 tsan 需要 `setarch -R`，已在 test/CMakeLists.txt 处理）。
@@ -41,7 +40,7 @@ ctest --preset dev --output-on-failure          # 单测（gtest，54 例）
 ## 运行
 
 ```bash
-./build/dev/src/llm-gateway -c home/gateway.json
+./build/dev/llm-gateway -c home/gateway.json
 ```
 
 `home/gateway.json` 默认监听 `0.0.0.0:8080`，上游指向本机 Qwen3.6（`127.0.0.1:10010`）与 Qwen3.8（`10009`）。
@@ -68,7 +67,8 @@ curl -s $GW/healthz
 - 透传上游输出结构（reasoning_content、tool_calls 分片、finish_reason、`[DONE]`），网关注入的计量字段（`timings`/`prompt_progress`）默认对客户端不可见；
 - token 计量只取上游报告值，`prompt/cached/prompt_computed/completion` 记录在运行日志（G09 起进访问日志与指标）；
 - 背压：下游慢读触发高水位 → 暂停读上游 + stall 定时器；恢复后继续；
-- 取消传播：下游断开 → 向上游发 FIN + 排空已到达数据取最后计数 → 立即释放模型槽位；
+- 取消传播：下游断开 → 向上游发 FIN + 排空已到达数据取最后一个累计计数 → 立即释放模型槽位；
+- `/v1/messages`（Anthropic 入口）在 G14 之前返回 404；
 - 超时：connect / ttft / idle / total / precommit / stall 全部按上游配置生效；llamacpp 上游的进度事件会把 ttft 切换为 idle。
 
 ## 测试与验收
@@ -80,5 +80,5 @@ curl -s $GW/healthz
 ## 已知限制（当前里程碑）
 
 - 尚无访问日志/指标（G09）、限流（G10）、账本与配额（G11）、重试/熔断（G12）、缓存（G13）、Anthropic 入口与协议转换（G14）；
-- 下游连接 SO_SNDBUF 固定 64KB，用于让用户态高水位（背压）及时生效并约束内核内存；
+- 下游连接 SO_SNDBUF 默认 64KB（`stream.downstream_sndbuf_bytes`），用于让用户态高水位（背压）及时生效并约束内核内存；
 - 上游 `base_url` 只支持 `http://`。
