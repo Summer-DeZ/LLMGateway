@@ -1,1 +1,6 @@
 /temp
+/build
+/logs
+/data
+deploy/.env
+compile_commands.json
