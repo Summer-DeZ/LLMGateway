@@ -108,7 +108,7 @@ Anthropic 入口：
 | 配额用尽 | 429 | `insufficient_quota`（code 同名） | `rate_limit_error`（message 写明 token quota exceeded） |
 | 账本或 Redis 不可用（fail closed） | 503 | `service_unavailable` | `overloaded_error` |
 | 所有尝试失败，最后一次是超时 | 504 | `upstream_timeout` | `api_error` |
-| 所有尝试失败，最后一次是 DNS/连接/TLS/断开 | 502 | `upstream_error` | `api_error` |
+| 所有尝试失败，最后一次是 DNS/连接/断开 | 502 | `upstream_error` | `api_error` |
 | 所有尝试失败，最后一次是上游 429/5xx | 上游原状态码 | 同协议原样透传；跨协议按 [protocol-translation.md §7](protocol-translation.md#7-错误体转换) 转换 | 同左 |
 | 所有目标都被熔断 | 503 | `upstream_unavailable` | `overloaded_error` |
 | 网关正在退出 | 503 | `server_shutting_down` | `overloaded_error` |
@@ -189,6 +189,7 @@ data: {第二行}\n …          ← data 里的每个 \n 拆成独立的 data �
 
 ## 9. URL
 
-`parseBaseUrl("https://api.deepseek.com")` → `{tls=true, host="api.deepseek.com", port=443, path_prefix=""}`；
-`http://127.0.0.1:10010/v1` → `{false, "127.0.0.1", 10010, "/v1"}`。支持 IPv6 字面量 `[::1]:8080`。
+`parseBaseUrl("http://127.0.0.1:10010/v1")` → `{host="127.0.0.1", port=10010, path_prefix="/v1"}`；
+`http://localhost` → `{"localhost", 80, ""}`。支持 IPv6 字面量 `[::1]:8080`。
+`https://` 及其他 scheme 返回错误（本项目不实现 TLS），配置加载因此失败并指出是哪个上游。
 末尾 `/` 去掉；不支持 userinfo 和 query。拼接：`path_prefix + "/chat/completions"` 或 `path_prefix + "/messages"`。

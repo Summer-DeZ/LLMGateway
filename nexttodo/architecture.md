@@ -12,7 +12,7 @@ app ──► gateway ──► http ──► net ──► base
 | 模块 | 库目标 | 命名空间 | 职责 | 外部依赖 |
 | --- | --- | --- | --- | --- |
 | base | `gw_base` | `gw` | noncopyable、Timestamp/Clock、日志封装、CurrentThread、字符串小工具 | spdlog |
-| net | `gw_net` | `gw::net` | Reactor、TCP、Transport（明文/TLS）、Resolver、Connector | OpenSSL（G08 起）、Threads |
+| net | `gw_net` | `gw::net` | Reactor、TCP、Transport（明文）、Resolver、Connector | Threads |
 | http | `gw_http` | `gw::http` | HTTP/1.1 请求/响应解析、chunked、SSE、HttpServer、UpstreamClient、UpstreamPool | — |
 | store | `gw_store` | `gw::store` | 自研 RESP2 Redis 客户端、libpq 异步 PgClient，均挂在 EventLoop 上 | libpq（pkg-config） |
 | proto | `gw_proto` | `gw::proto` | 中立消息/流事件、OpenAI 与 Anthropic 编解码、Translator、token 估算（仅用于限流预留） | nlohmann/json |
@@ -30,7 +30,7 @@ app ──► gateway ──► http ──► net ──► base
 | 线程 | 数量 | 拥有并运行的对象 |
 | --- | --- | --- |
 | main（base loop） | 1 | `Acceptor`、`TcpServer`、signalfd 通道、每秒一次的全局定时任务（缓存过期清扫、熔断状态、指标 gauge 刷新） |
-| io loop | `io_threads`（默认 8） | 下游 `TcpConnection`、`HttpConnState`、`ProxySession`、该会话的上游 `TcpConnection`、本 loop 的 `UpstreamPool`、TLS 会话与 `RedisClient` |
+| io loop | `io_threads`（默认 8） | 下游 `TcpConnection`、`HttpConnState`、`ProxySession`、该会话的上游 `TcpConnection`、本 loop 的 `UpstreamPool` 与 `RedisClient` |
 | resolver | 1 | 阻塞 `getaddrinfo` 工作队列、DNS 缓存 |
 | ledger loop | 1 | 一个专用 EventLoop：PgClient 写连接（账本批量入账）与读连接（用量查询）、LedgerWriter 队列消费 |
 | spdlog async | 1 | 访问日志与运行日志落盘 |
@@ -58,7 +58,7 @@ UpstreamPool 是 **每 loop 一个**，不共享：在 `EventLoopThreadPool` 的
 ```text
 GatewayContext（main 栈上，生命周期覆盖所有 loop）
  ├─ shared_ptr<const Config>
- ├─ RateLimiter / ResponseCache / Metrics / CircuitBreakerSet / Resolver / TlsContext / AccessLog / RecentRequests
+ ├─ RateLimiter / ResponseCache / Metrics / CircuitBreakerSet / Resolver / AccessLog / RecentRequests
  ├─ ledger loop 线程（EventLoopThread）+ LedgerWriter + 两个 PgClient（写 / 读）   ← 仅配置了 postgres 时
  ├─ 每个 io loop 的 context：UpstreamPool、RedisClient（仅配置了 redis 时）
  └─ HttpServer
@@ -108,7 +108,7 @@ LLMGateway/
 │  │  ├─ net/      event_loop.hpp channel.hpp poller.hpp timer_queue.hpp timer_id.hpp
 │  │  │            event_loop_thread.hpp event_loop_thread_pool.hpp buffer.hpp
 │  │  │            inet_address.hpp socket.hpp acceptor.hpp tcp_server.hpp tcp_connection.hpp
-│  │  │            transport.hpp tls.hpp resolver.hpp connector.hpp callbacks.hpp
+│  │  │            transport.hpp resolver.hpp connector.hpp callbacks.hpp
 │  │  ├─ http/     http_request.hpp request_parser.hpp response_parser.hpp chunked.hpp
 │  │  │            sse.hpp response_writer.hpp http_server.hpp upstream_client.hpp upstream_pool.hpp url.hpp
 │  │  ├─ store/    resp.hpp redis_client.hpp pg_client.hpp
@@ -142,7 +142,7 @@ set(CMAKE_CXX_STANDARD 23)  set(CMAKE_CXX_STANDARD_REQUIRED ON)  set(CMAKE_CXX_E
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(GW_BUILD_TESTS "Build unit tests and fault upstream" ON)
 find_package(Threads REQUIRED)
-find_package(OpenSSL 3.0 REQUIRED)     # libssl-dev，G00 安装
+find_package(OpenSSL 3.0 REQUIRED COMPONENTS Crypto)   # libssl-dev，G00 安装；只用 libcrypto 的 SHA-256
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PQ REQUIRED IMPORTED_TARGET libpq)   # libpq-dev，G00 安装；不用 find_package(PostgreSQL)
 include(cmake/deps.cmake)
@@ -173,7 +173,7 @@ CLI11 v2.7.2；nlohmann 作为 INTERFACE 目标指向 `src/public/lib`；googlet
 | 目标 | 类型 | 链接 |
 | --- | --- | --- |
 | `gw_base` | STATIC | spdlog::spdlog |
-| `gw_net` | STATIC | gw_base, Threads::Threads, OpenSSL::SSL |
+| `gw_net` | STATIC | gw_base, Threads::Threads |
 | `gw_http` | STATIC | gw_net |
 | `gw_store` | STATIC | gw_net, PkgConfig::PQ |
 | `gw_proto` | STATIC | gw_base, nlohmann_json |

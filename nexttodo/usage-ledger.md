@@ -56,7 +56,7 @@ services:
 
 ## 3. 新模块 `store`（`gw_store`，依赖 `gw_net`）
 
-两个数据库客户端都是**非阻塞、挂在 EventLoop 上**的，与上游 HTTP/TLS 客户端同一套 Reactor 用法。
+两个数据库客户端都是**非阻塞、挂在 EventLoop 上**的，与上游 HTTP 客户端同一套 Reactor 用法。
 
 ### 3.1 RedisClient：自己实现的 RESP2 客户端
 
@@ -284,7 +284,7 @@ remaining  最近一次从 Redis 得知的剩余额度（准入时、每次 quot
 - 同一个 key 有多个并发流（可能分布在不同网关实例）时，每个流都只知道稍旧的 `remaining`，
   超额上限约为"并发流数 × report_every_tokens + 一次 Redis 往返内生成的量"。这是用有限的超额换取不在每个 token 上访问 Redis，属于常规取舍，写进文档。
 - **预填充也算**：llamacpp 上游在开始处理 prompt 时就报出 prompt 总数，一个超大 prompt 在输出任何内容前就会触发超额（尚未提交 → 429）。
-- `final` 计量的上游（DeepSeek、Anthropic 云端）流中没有计数：准入时把发给上游的 `max_tokens` 限制为
+- `final` 计量的上游（`qwen36-anth`、`qwen36-final`）流中没有计数：准入时把发给上游的 `max_tokens` 限制为
   `min(请求里的 max_tokens，缺省时取 models.*.default_max_tokens, remaining)`。
   这个值来自 Redis 的剩余额度，不是估算。结束时一次性 `quota_add`，超额上限是"一次请求的 prompt"。
 - 未报告的用量不会进入 Redis，只在账本里计入 `unreported_requests`，对账时可见。

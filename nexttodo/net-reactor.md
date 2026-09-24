@@ -1,6 +1,6 @@
-# net：Reactor、传输层、TLS 与上游连接
+# net：Reactor、传输层与上游连接
 
-模块 `gw_net`（Resolver/Connector/TLS 也在这里），HTTP 相关的连接池在 `gw_http`。以下接口是**建议签名**：
+模块 `gw_net`（Resolver/Connector 也在这里），HTTP 相关的连接池在 `gw_http`。以下接口是**建议签名**：
 语义锁定，命名可以调整。参考实现思路：陈硕《Linux 多线程服务端编程》与 muduo 源码（`muduo/net/`）。
 
 ## 1. 文件与类
@@ -15,8 +15,7 @@
 | `buffer.hpp` | `Buffer` | prependable + readable + writable；`readFd` 用 readv + 64KB 栈缓冲 |
 | `inet_address.hpp` `socket.hpp` | | IPv4/IPv6 地址、RAII socket、`setTcpNoDelay/setKeepAlive/setReuseAddr` |
 | `acceptor.hpp` `tcp_server.hpp` | | 监听、`accept4(SOCK_NONBLOCK|SOCK_CLOEXEC)`、EMFILE 处理 |
-| `transport.hpp` | `Transport` `PlainTransport` | 明文/TLS 统一读写接口 |
-| `tls.hpp` | `TlsContext` `TlsTransport` | OpenSSL 集成（G08） |
+| `transport.hpp` | `Transport` `PlainTransport` | 读写接口（只有明文实现） |
 | `tcp_connection.hpp` | `TcpConnection` | 服务端与客户端共用；水位回调、暂停/恢复读 |
 | `resolver.hpp` | `Resolver` | 独立线程 `getaddrinfo` + 缓存 |
 | `connector.hpp` | `Connector` | 非阻塞 connect、多地址、超时 |
@@ -47,7 +46,7 @@ public:
 
 ## 3. Channel 与 EpollPoller
 
-- 水平触发（LT），不要用 ET：TLS 与暂停读都依赖"只要有数据就会再次通知"。
+- 水平触发（LT），不要用 ET：暂停读依赖"只要有数据就会再次通知"。
 - 关注事件：`EPOLLIN | EPOLLPRI | EPOLLRDHUP`（读）、`EPOLLOUT`（写）。
 - `handleEvent` 分发顺序：`EPOLLHUP && !EPOLLIN` → close；`EPOLLERR` → error；`EPOLLIN|EPOLLPRI|EPOLLRDHUP` → read；`EPOLLOUT` → write。
   带 `EPOLLRDHUP` 且同时有 `EPOLLIN` 时先 read（把剩余数据读完），read 返回 0 时再走 close。
@@ -71,87 +70,37 @@ public:
 
 - `readFd(fd, &savedErrno)`：`readv` 两段——Buffer 可写区 + 栈上 64KB，读到栈上的部分再 append，一次系统调用读够。
 - 需要的查找函数：`findCRLF()`、`findDoubleCRLF()`、`findEOL()`；`retrieve(n)`、`retrieveAll()`、`retrieveAsString(n)`；`peek()`、`readableBytes()`。
-- `ensureWritableBytes(n)`：先尝试把 readable 前移腾空间，不够再扩容。TLS 读用它为 `SSL_read_ex` 准备连续空间。
+- `ensureWritableBytes(n)`：先尝试把 readable 前移腾空间，不够再扩容。
 - 可以提供 `shrink(reserve)`：长连接空闲时把大缓冲收缩，避免一次大响应之后长期占内存。
 
-## 6. TLS 传输
+## 6. 传输层
 
-### 6.1 Transport 接口
+本项目只接本地明文上游，**不实现 TLS**（原 G08 已移出范围）。
 
 ```cpp
 enum class IoStatus { ok, would_block, eof, error };
 struct IoResult { IoStatus status; std::size_t bytes = 0; };
 
-enum class HandshakeStatus { done, want_read, want_write, failed };
-
 class Transport {
 public:
     virtual ~Transport() = default;
-    virtual HandshakeStatus handshake() = 0;            // 明文：直接 done
     virtual IoResult readInto(Buffer& in) = 0;          // 读到 would_block/eof/error 或本轮上限（64KB）为止
     virtual IoResult write(const char* data, std::size_t n) = 0;
-    virtual bool hasBufferedInput() const = 0;          // TLS：SSL_has_pending；明文：false
-    virtual bool readWantsWrite() const { return false; }   // TLS 读时报 WANT_WRITE
-    virtual bool writeWantsRead() const { return false; }   // TLS 写时报 WANT_READ
-    virtual void shutdownWrite() = 0;                   // 明文：::shutdown(SHUT_WR)；TLS：SSL_shutdown 一次后 SHUT_WR
+    virtual void shutdownWrite() = 0;                   // ::shutdown(SHUT_WR)
     virtual std::string lastError() const = 0;          // 分类与日志用
 };
 ```
 
-`TcpConnection` 只和 `Transport` 打交道。明文实现就是 `Buffer::readFd` 与 `::write`。
+`TcpConnection` 只和 `Transport` 打交道，唯一实现 `PlainTransport` 就是 `Buffer::readFd` 与 `::write`。
+保留这层接口还是直接在 `TcpConnection` 里读写 fd，由实现者决定。
 
-### 6.2 TlsContext（整个进程一个，跨线程只读共享）
-
-| 步骤 | OpenSSL 调用 |
-| --- | --- |
-| 创建 | `SSL_CTX_new(TLS_client_method())` |
-| 最低版本 | `SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION)` |
-| 证书校验 | `SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr)`；`SSL_CTX_set_default_verify_paths(ctx)`；配置了 `ca_file` 时 `SSL_CTX_load_verify_locations` |
-| ALPN | `SSL_CTX_set_alpn_protos(ctx, "\x08http/1.1", 9)`——只说 HTTP/1.1，避免服务端选 h2 |
-| 会话恢复 | `SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL_STORE)`；`SSL_CTX_sess_set_new_cb` 回调里按 `host:port` 存 `SSL_SESSION*`（加锁；替换旧值时 `SSL_SESSION_free`；回调返回 1 表示接管引用） |
-
-TLS 1.3 的会话票据在握手**之后**才到达，所以必须用 new-session 回调捕获，不能在握手完成时 `SSL_get1_session`。
-
-### 6.3 TlsTransport（每连接一个，只在所属 loop 线程使用）
-
-建立：
-
-```text
-SSL_new(ctx) → SSL_set_fd(fd) → SSL_set_connect_state
-→ 主机名：SSL_set_tlsext_host_name(ssl, host)（SNI；IP 字面量跳过）
-          SSL_set1_host(ssl, host)（证书主机名校验；IP 字面量改用 X509_VERIFY_PARAM_set1_ip_asc）
-→ SSL_set_mode(ssl, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER)
-→ 有缓存会话时 SSL_set_session(ssl, sess)
-```
-
-| 操作 | 实现 | 结果映射 |
-| --- | --- | --- |
-| 握手 | `SSL_do_handshake` | 1 → done；`SSL_ERROR_WANT_READ` → want_read（只关注读）；`WANT_WRITE` → want_write（关注写）；其他 → failed，错误文本拼上 `X509_verify_cert_error_string(SSL_get_verify_result(ssl))` |
-| 读 | 循环 `ensureWritableBytes(16KB)` + `SSL_read_ex`，直到 WANT_READ 或本轮读满 64KB | `SSL_ERROR_ZERO_RETURN` → eof（对端 close_notify）；`SSL_ERROR_SYSCALL`/`SSL_R_UNEXPECTED_EOF_WHILE_READING` → eof 并标记"非正常关闭"；WANT_WRITE → 置 `readWantsWrite`，让连接关注写事件，写就绪时先重试读 |
-| 写 | `SSL_write_ex(ssl, outputBuffer.peek(), readable)` | 成功返回实际写入字节；WANT_WRITE → would_block；WANT_READ → 置 `writeWantsRead` |
-| 关闭 | `SSL_shutdown` 调用一次（发 close_notify，不等对端），然后关闭 fd | — |
-
-必须遵守的 OpenSSL 细节：
-
-1. **每次调用 `SSL_*` 之前 `ERR_clear_error()`**。错误队列是线程级的，残留错误会让 `SSL_get_error` 返回错误的分类。
-2. WANT_WRITE 之后重试 `SSL_write` 必须传相同的数据（可以更长）。因为 Buffer 可能扩容挪位，所以要 `ACCEPT_MOVING_WRITE_BUFFER`。
-3. 暂停读（背压）时 SSL 内部可能已经解密了数据，socket 却是空的，LT epoll 不会再通知。
-   `startRead()` 时如果 `hasBufferedInput()` 为真，要 `queueInLoop(handleRead)` 主动读一次。
-   本轮读满 64KB 提前退出时同理：SSL 里还有数据，socket 可能已经空了。
-4. 握手耗时（connect 完成 → 握手完成）和 `SSL_session_reused(ssl)` 写进连接的统计，G08 验收要用。
-5. 不做 HTTP/2，不做 OCSP，不做客户端证书；代理环境变量不支持（在文档里说明）。
-
-### 6.4 错误分类
-
-| 类别 | 例子 | 是否可重试 |
-| --- | --- | --- |
-| `tls_verify` | 证书过期、主机名不匹配、未知 CA | 否（配置/安全问题） |
-| `tls_handshake` | 对端握手中断、协议版本不匹配 | 是（可能是网络抖动），计入熔断 |
-| `tls_io` | 读写中 SSL_ERROR_SSL | 是 |
+已有代码里为 TLS 写的部分随之删除：`net/tls.{hpp,cpp}`、`TlsContext`/`TlsTransport`、`Transport` 的
+`handshake`/`hasBufferedInput`/`readWantsWrite`/`writeWantsRead`、`TcpConnection` 的 `kHandshaking` 分支与 `tlsResumed`、
+`UpstreamPool` 的 https 分支、配置里的 `tls` 段，以及 `gw_net` 对 `OpenSSL::SSL` 的链接（`gw_gateway` 仍用 `OpenSSL::Crypto` 算 SHA-256）。
 
 ## 7. TcpConnection
 
-状态：`kHandshaking → kConnected → kDisconnecting → kDisconnected`（服务端明文连接直接从 kConnected 开始）。
+状态：`kConnected → kDisconnecting → kDisconnected`（服务端连接与上游连接都在 fd 就绪后直接从 kConnected 开始）。
 
 ```cpp
 class TcpConnection : noncopyable, public std::enable_shared_from_this<TcpConnection> {
@@ -168,12 +117,12 @@ public:
     void startRead(); void stopRead(); bool isReading() const;
     void setTcpNoDelay(bool);
     std::size_t outputBytes() const;                  // 背压与指标用
-    void setConnectionCallback(ConnectionCallback);   // 上线（握手完成）/ 下线各一次
+    void setConnectionCallback(ConnectionCallback);   // 上线 / 下线各一次
     void setMessageCallback(MessageCallback);         // (conn, Buffer*, Timestamp)
     void setWriteCompleteCallback(WriteCompleteCallback);          // 输出缓冲清空时
     void setHighWaterMarkCallback(HighWaterMarkCallback, std::size_t mark);
     void setCloseCallback(CloseCallback);             // 所有者（TcpServer/连接池）用来移除引用
-    const std::string& lastError() const;             // 握手失败、transport 错误
+    const std::string& lastError() const;             // transport 错误
     std::any& context();
     void connectEstablished(); void connectDestroyed();
 };
@@ -192,6 +141,10 @@ public:
 
 - **所有 socket 设置 `TCP_NODELAY`**。SSE 每个事件只有几十到几百字节，Nagle 与延迟 ACK 叠加会给每个 token 增加最多约 40ms 延迟，TTFT 和逐 token 延迟都会被拉高。
 - 服务端连接开启 `SO_KEEPALIVE`。
+- **连接关闭后的寿命**：`EventLoop::loop` 遍历的是本轮 epoll 返回的裸 `Channel*`。前一个事件的回调（下游断开 → 取消 → 会话析构，
+  或定时器 → finish）可能释放同一轮里后面某个上游连接的最后一个引用。`handleClose` 必须持有 `shared_from_this()` 并
+  `queueInLoop` 一个空任务（或像 TcpServer 那样 `queueInLoop(connectDestroyed)`），把对象析构推迟到本轮所有事件处理完之后。
+  上游连接不归 TcpServer 管，最容易踩到。
 - 流式期间**下游连接始终保持读关注**，否则无法及时发现客户端断开（取消传播依赖它）。
   客户端在流式期间发来的多余字节只进输入缓冲；超过 64KB 视为异常直接关闭。
 
@@ -244,20 +197,20 @@ public:
 ## 11. UpstreamPool（`gw_http`，每 loop 一个）
 
 ```cpp
-struct UpstreamKey { bool tls; std::string host; std::uint16_t port; auto operator<=>(const UpstreamKey&) const = default; };
+struct UpstreamKey { std::string host; std::uint16_t port; auto operator<=>(const UpstreamKey&) const = default; };
 
-struct AcquireError { enum Kind { resolve, connect_refused, connect_timeout, tls_verify, tls_handshake, cancelled } kind; std::string message; };
+struct AcquireError { enum Kind { resolve, connect_refused, connect_timeout, cancelled } kind; std::string message; };
 
 class UpstreamPool : noncopyable {
 public:
-    UpstreamPool(EventLoop*, Resolver&, TlsContext*, PoolOptions);
-    // 回调在本 loop 上执行；返回的连接已完成 TLS 握手、处于 kConnected
+    UpstreamPool(EventLoop*, Resolver&, PoolOptions);
+    // 回调在本 loop 上执行，且保证一定回调一次（成功、失败或 cancelled）；返回的连接处于 kConnected
     std::shared_ptr<AcquireHandle> acquire(const UpstreamKey&, std::chrono::milliseconds connect_timeout,
         std::function<void(std::expected<Lease, AcquireError>)> cb);
     void release(Lease);              // 仅在连接可复用时调用，否则 lease 析构时直接关闭
     std::size_t idleCount() const;
 };
-struct Lease { std::shared_ptr<TcpConnection> conn; bool reused; Duration connect_time; Duration tls_time; bool tls_resumed; };
+struct Lease { std::shared_ptr<TcpConnection> conn; bool reused; Duration connect_time; };
 ```
 
 - 空闲连接按 key 存 LIFO 栈，每个 key 最多 `max_idle_per_host`（默认 16）；空闲超过 `idle_timeout` 关闭。
@@ -272,8 +225,7 @@ struct Lease { std::shared_ptr<TcpConnection> conn; bool reused; Duration connec
 | 现象 | 原因 | 对策 |
 | --- | --- | --- |
 | 流式每个 token 都慢 40ms | Nagle + 延迟 ACK | 两端都 `TCP_NODELAY` |
-| 背压恢复后流卡住不动 | TLS 缓冲里有数据，socket 已空，LT 不再通知 | `startRead` 时检查 `SSL_has_pending` |
-| 偶发 `SSL_get_error` 分类错误 | 线程错误队列有残留 | 每次调用前 `ERR_clear_error()` |
+| 偶发 crash / asan heap-use-after-free，位置在 `Channel::handleEvent` | 同一轮 epoll 结果里，前一个事件的回调把后一个 fd 的 TcpConnection 析构了 | `handleClose` 把连接的寿命延到本轮事件处理完（§7） |
 | 取消后又收到上游回调导致 crash | 回调捕获了裸指针/强引用 | 统一捕获 `weak_ptr`；Channel `tie` |
 | 定时器回调里取消自身无效或 double free | 到期处理期间的取消没记录 | `cancelingTimers_` |
 | 复用连接偶发 "empty reply" | 对端刚好关闭空闲连接 | 未收到字节前失败 → 新连接重发一次 |

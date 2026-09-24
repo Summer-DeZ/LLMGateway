@@ -98,7 +98,7 @@ nlohmann 默认用 `std::map` 存对象，键天然有序，`dump()` 结果就�
 | `latency_ms` | received_at → 最后一个字节交给下游连接 |
 | `ttft_ms` | received_at → 首 token 事件写给下游（流式；非流式为 null） |
 | `upstream_ttfb_ms` | 最后一次尝试：请求写出 → 上游首个响应字节 |
-| `connect_ms`、`tls_ms`、`tls_resumed`、`conn_reused` | 最后一次尝试的连接信息 |
+| `connect_ms`、`conn_reused` | 最后一次尝试的连接信息 |
 | `prompt_tokens`、`cached_tokens`、`prompt_computed_tokens`、`completion_tokens` | 各尝试之和，全部来自上游报告；有未报告部分时为 null（[§4.6](#46-请求级汇总与成本)） |
 | `usage_source`、`usage_complete` | `upstream_final` / `upstream_partial` / `unreported` / `cache` / `rejected` |
 | `attempts[]` | 每次尝试：`upstream`、`result`、`http_status`、`prompt`、`cached`、`prompt_computed`、`completion`、`source` |
@@ -111,7 +111,7 @@ nlohmann 默认用 `std::map` 存对象，键天然有序，`dump()` 结果就�
 ### 3.2 TTFT 的定义
 
 从网关收齐请求体开始，到第一个"首 token 事件"（[protocol-translation.md §2](protocol-translation.md#2-中立模型protoneutralhpp)）写给下游为止。
-它包含网关排队、限流检查、建连/TLS、上游排队与预填充时间，是用户实际感受到的首字延迟。
+它包含网关排队、限流检查、建连、上游排队与预填充时间，是用户实际感受到的首字延迟。
 `upstream_ttfb_ms` 用来区分"网关/网络慢"还是"模型慢"。
 
 ### 3.3 成本
@@ -124,7 +124,7 @@ nlohmann 默认用 `std::map` 存对象，键天然有序，`dump()` 结果就�
 | 输出 | 实现 | 内容 |
 | --- | --- | --- |
 | 访问日志 | spdlog 异步 logger + `rotating_file_sink`（50MB × 5），路径 `log.access_file` | 每请求一行 JSON（RequestRecord） |
-| 运行日志 | spdlog，控制台 + `log.file` | 启动配置摘要、熔断状态变化、TLS 错误、慢请求（latency > `log.slow_ms`） |
+| 运行日志 | spdlog，控制台 + `log.file` | 启动配置摘要、熔断状态变化、上游连接错误、慢请求（latency > `log.slow_ms`） |
 | `/metrics` | Prometheus 文本格式 0.0.4 | 见 §3.5 |
 | `/admin/requests?limit=N` | 最近 256 条 RequestRecord 的环形缓冲（mutex） | JSON 数组，新的在前 |
 | `/admin/stats` | 从 Metrics 汇总 | 按用户、按模型：请求数、各 outcome 计数、token、成本、TTFT/延迟的 p50/p95（由直方图估算）；缓存、熔断、连接池、活跃流 |
@@ -145,7 +145,6 @@ nlohmann 默认用 `std::map` 存对象，键天然有序，`dump()` 结果就�
 | `gateway_upstream_attempts_total` | counter | upstream, result（ok/retryable/fatal） |
 | `gateway_upstream_ttfb_seconds` | histogram | upstream |
 | `gateway_upstream_circuit_state` | gauge | upstream（0 closed / 1 open / 2 half_open） |
-| `gateway_tls_handshakes_total` | counter | upstream, resumed（true/false） |
 | `gateway_cache_requests_total` | counter | result（hit/miss） |
 | `gateway_cache_bytes`、`gateway_cache_entries` | gauge | |
 | `gateway_cache_saved_cost_usd_total` | counter | model |
@@ -175,7 +174,7 @@ nlohmann 默认用 `std::map` 存对象，键天然有序，`dump()` 结果就�
 | --- | --- | --- | --- |
 | `llamacpp` | `openai-chat` kind 指向 llama-server（Qwen3.6、Qwen3.8） | `timings_per_token: true`；流式再加 `return_progress: true` | 预填充期间：`prompt_progress{total, cache, processed}`；之后每个 chunk：累计的 `timings{cache_n, prompt_n, predicted_n}`；结束时 `usage` |
 | `vllm` | `openai-chat` kind 指向 vLLM | `stream_options.continuous_usage_stats: true` | 每个 chunk 的累计 `usage` |
-| `final`（默认） | 云端 OpenAI 兼容服务（DeepSeek 等）、所有 `anthropic` kind | OpenAI 加 `stream_options.include_usage: true` | 只在流结束时有 `usage`；Anthropic 另外在 `message_start` 里给出精确的输入与缓存 token |
+| `final`（默认） | 所有 `anthropic` kind（`qwen36-anth`）；不发进度/计数的 OpenAI 兼容上游（本地用 `qwen36-final` 模拟） | OpenAI 加 `stream_options.include_usage: true` | 只在流结束时有 `usage`；Anthropic 另外在 `message_start` 里给出精确的输入与缓存 token |
 
 已核实的 llama.cpp（5b59b83）行为：`timings_per_token` 为真时每个 OpenAI chunk 都带 `timings`（`server-context.cpp` 2082 行）；
 `return_progress` 为真时开始处理 prompt 就发 0% 进度，处理中持续发进度（3418、3808 行）；
@@ -225,7 +224,7 @@ struct AttemptUsage {
 
 中止一个正在进行的尝试时，按下面的顺序处理，不能直接 `close()`：
 
-1. `shutdown(SHUT_WR)`（TLS 先发 `close_notify`）：上游立刻看到 FIN，llama.cpp 的 `is_connection_closed` 随即成立并中止任务。**取消延迟以这一步为准**。
+1. `shutdown(SHUT_WR)`：上游立刻看到 FIN，llama.cpp 的 `is_connection_closed` 随即成立并中止任务。**取消延迟以这一步为准**。
 2. 非阻塞地把 socket 里已经到达的字节全部读出（直到 `EAGAIN`，上限 1MB），只喂给 SSE 解析器和 UsageMeter，不转发。
    背压暂停期间内核缓冲里可能积了不少数据，这一步把它们里面最新的累计计数取出来。
 3. `close()`。
@@ -234,7 +233,7 @@ struct AttemptUsage {
 协议层面唯一拿不到的，是上游在最后一次发送之后、发现连接断开之前又生成的 token：llama.cpp 每生成一个 token 就发送一次，这部分通常是 0–1 个。
 文档和 `/admin` 输出里要如实说明这一点，不能把它说成"完全精确"。
 
-`final` 计量的上游（DeepSeek 等）被取消时协议里没有 output 计数：`completion = null`、`source = unreported`；
+`final` 计量的 OpenAI 上游（`qwen36-final`）被取消时协议里没有 output 计数：`completion = null`、`source = unreported`；
 Anthropic 上游的 `prompt`/`cached` 在 `message_start` 之后已知，照常记录。
 
 ### 4.6 请求级汇总与成本
@@ -285,8 +284,7 @@ Anthropic 上游的 `prompt`/`cached` 在 `message_start` 之后已知，照常�
     "access_file": "logs/access.log",
     "slow_ms": 30000
   },
-  "stream": { "high_water_bytes": 262144, "stall_ms": 60000 },
-  "tls": { "verify_peer": true, "ca_file": "" },
+  "stream": { "high_water_bytes": 262144, "stall_ms": 60000, "downstream_sndbuf_bytes": 65536 },
   "dns": { "cache_ttl_seconds": 60 },
   "cache": { "enabled": true, "max_bytes": 268435456, "max_entry_bytes": 4194304, "ttl_seconds": 600 },
   "users": {
@@ -308,28 +306,28 @@ Anthropic 上游的 `prompt`/`cached` 在 `message_start` 之后已知，照常�
                      "default_max_tokens": 8192, "count_tokens": true },
     "qwen38": { "kind": "openai-chat", "base_url": "http://127.0.0.1:10009/v1", "model": "Qwen3.8-Flash-Next", "metering": "llamacpp",
                 "extra_body": { "chat_template_kwargs": { "enable_thinking": true } } },
-    "deepseek": { "kind": "openai-chat", "base_url": "https://api.deepseek.com", "model": "deepseek-flash", "api_key": "env:DEEPSEEK_API_KEY" },
+    "qwen36-final": { "kind": "openai-chat", "base_url": "http://127.0.0.1:10010/v1", "model": "Qwen3.6-35B-A3B", "metering": "final" },
     "fault": { "kind": "openai-chat", "base_url": "http://127.0.0.1:19000/v1", "model": "fault", "metering": "llamacpp" }
   },
   "models": {
     "qwen":       { "targets": ["qwen36", "qwen38"], "rpm": 120, "tpm": 1000000, "default_max_tokens": 4096,
                     "retry": { "max_attempts": 2, "base_ms": 500, "max_ms": 8000, "max_retry_after_ms": 10000 } },
     "qwen-anth":  { "targets": ["qwen36-anth"] },
-    "smart":      { "targets": ["deepseek", "qwen36"] },
+    "qwen-final": { "targets": ["qwen36-final"] },
     "fault-demo": { "targets": ["fault", "qwen36"], "retry": { "max_attempts": 3, "base_ms": 200, "max_ms": 2000 } }
   },
   "pricing": {
     "qwen36":   { "input": 0.10, "output": 0.40 },
-    "qwen38":   { "input": 0.05, "output": 0.20 },
-    "deepseek": { "input": 0.27, "output": 1.10, "cached": 0.07 }
+    "qwen38":   { "input": 0.05, "output": 0.20 }
   }
 }
 ```
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
+| `stream.downstream_sndbuf_bytes` | 65536 | 下游连接的 `SO_SNDBUF`。不限制时内核发送缓冲自动增长到数 MB，用户态高水位很难触发，背压不可观测；0 表示不设置 |
 | `upstreams.*.kind` | 必填 | `openai-chat` 或 `anthropic` |
-| `upstreams.*.base_url` | 必填 | 解析规则见 [http.md §9](http.md#9-url) |
+| `upstreams.*.base_url` | 必填 | 只接受 `http://`，解析规则见 [http.md §9](http.md#9-url) |
 | `upstreams.*.api_key` | 空 | 空则不发鉴权头；建议 `env:NAME` |
 | `upstreams.*.timeouts.*` | 见 [proxy-session.md §3](proxy-session.md#3-超时) | |
 | `upstreams.*.pool_idle_seconds` | 4 | 必须小于对端 keep-alive 超时 |
@@ -341,7 +339,8 @@ Anthropic 上游的 `prompt`/`cached` 在 `message_start` 之后已知，照常�
 | `models.*.retry` | `{2, 500, 8000, 10000}` | |
 | `users` 的键 | — | 就是客户端使用的 API key；`name` 用于日志和指标标签 |
 
-本地模型的单价是为演示成本统计设的名义价格。
+所有上游都在本机，单价是为演示成本统计设的名义价格。`qwen36-final` 与 `qwen36` 是同一个 llama-server，
+只是按 `final` 计量（不注入 `timings_per_token`/`return_progress`），用来在本地验证 `final` 计量上游的行为。
 
 账本、配额相关的 `users.*.quota`、`instance_id`、`postgres`、`redis`、`ledger`、`quota` 段见 [usage-ledger.md §8](usage-ledger.md#8-配置)。
 这些段是**可选**的：没有 `postgres` 段时不启动 ledger loop、不做 3a 检查、不入账；没有 `redis` 段时不创建 RedisClient。

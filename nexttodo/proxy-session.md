@@ -37,7 +37,7 @@ struct IngressRequest {
 | 状态 | 含义 | 活跃定时器 |
 | --- | --- | --- |
 | `Admitting` | 等待 Redis 配额查询的回复 | redis 命令超时 |
-| `Acquiring` | 从连接池取连接（可能要解析 DNS、建连、TLS 握手） | connect |
+| `Acquiring` | 从连接池取连接（可能要解析 DNS、建连） | connect |
 | `AwaitHead` | 请求已写出，等上游响应头 | ttft |
 | `AwaitFirstEvent` | 上游 2xx 响应头已到，流式请求在等第一个 SSE 事件（非流式在读整个响应体） | ttft（非流式：total） |
 | `Streaming` | 已向下游提交（写出了状态行），逐事件转发 | idle（上游）、stall（仅背压暂停时） |
@@ -80,9 +80,9 @@ stateDiagram-v2
 
 | 名称 | 默认 | 起止 | 超时后 |
 | --- | --- | --- | --- |
-| `connect_ms` | 10000 | 开始取连接 → 连接可用（含 DNS、TCP、TLS） | 按可重试失败处理 |
+| `connect_ms` | 10000 | 开始取连接 → 连接可用（含 DNS、TCP） | 按可重试失败处理 |
 | `ttft_ms` | 90000 | 请求写出 → 流式首个事件 / 非流式响应头 | 可重试失败 |
-| `idle_ms` | 60000 | Streaming 中相邻两次收到上游字节（SSE 注释也算） | 提交后：流内错误并结束 |
+| `idle_ms` | 60000 | Streaming 中相邻两次收到上游字节（SSE 注释也算）；**背压暂停期间停表**，恢复读时重新计时 | 提交后：流内错误并结束 |
 | `total_ms`（非流式） | 600000 | 请求写出 → 响应体完整 | 可重试失败 |
 | `stall_ms` | 60000 | 因背压暂停上游读取开始 → 恢复 | 两端都关闭，finish(`downstream_stalled`) |
 | `precommit_ms`（整个请求） | 100000 | received_at → commit | 立即中止当前尝试（`abortAndDrain`），不再开始新的尝试，按 §6.2 的最后一次失败返回错误 |
@@ -121,11 +121,14 @@ stateDiagram-v2
    → HighWaterMark 回调 → exchange.pauseReading()（上游关读关注）
    → 启动 stall 定时器，记录 pause 开始时间，metrics.backpressure_active++
 下游输出缓冲写空
-   → WriteComplete 回调 → 若处于暂停：exchange.resumeReading()（含 TLS 缓冲检查）
+   → WriteComplete 回调 → 若处于暂停：exchange.resumeReading()
    → 取消 stall 定时器，累计暂停时长，metrics.backpressure_active--
 stall 定时器到期
-   → 下游长时间不读：forceClose 下游 + 上游 abortAndDrain（§5.2）→ finish(downstream_stalled)
+   → 下游长时间不读：上游 abortAndDrain（§5.2）→ finish(downstream_stalled) → 最后 forceClose 下游
 ```
+
+- stall 的收尾顺序是锁定的：**先 finish 再关下游**。关下游会同步触发下游 close 回调，回调里看到会话已结束就什么都不做；
+  顺序反过来的话，close 回调会先把请求 `cancel()` 掉，记录变成 `outcome=cancelled`。验收以 finish 记录里的 `outcome` 为准，不以 WARN 日志为准。
 
 - 为什么这样就能约束内存：暂停读后，上游数据先堆在内核 socket 接收缓冲，满了之后 TCP 窗口归零，上游服务端的发送被阻塞。
   网关的用户态内存上限约为"每个流一个高水位 + 一次读取量（64KB）"。
@@ -151,7 +154,7 @@ stall 定时器到期
 | 状态 | 动作 |
 | --- | --- |
 | Acquiring | `AcquireHandle::cancel()`：停止 Connector；Resolver 的结果到达后被丢弃；正在握手的连接关闭 |
-| AwaitHead / AwaitFirstEvent / Streaming | `exchange.abortAndDrain()`：① `shutdown(SHUT_WR)`（TLS 先发 close_notify），上游立刻看到 FIN 并停止生成；② 非阻塞读出 socket 里已到达的全部字节（上限 1MB），只喂 SSE 解析器与 UsageMeter，不转发；③ `close()`。**不归还连接池** |
+| AwaitHead / AwaitFirstEvent / Streaming | `exchange.abortAndDrain()`：① `shutdown(SHUT_WR)`，上游立刻看到 FIN 并停止生成；② 非阻塞读出 socket 里已到达的全部字节（上限 1MB），只喂 SSE 解析器与 UsageMeter，不转发；③ `close()`。**不归还连接池** |
 | Admitting | 什么都不用做，Redis 回复到达后被丢弃 |
 | Backoff | 取消退避定时器（上一次尝试的计量已在它结束时完成） |
 | Replaying | 什么都不用做 |
@@ -168,7 +171,7 @@ stall 定时器到期
 
 ### 5.3 为什么关闭上游连接就能止损
 
-llama.cpp 在流式生成时检查 `is_connection_closed`，发现连接关闭就中止任务、释放槽位；OpenAI/Anthropic/DeepSeek 等云服务在连接断开后同样停止生成与计费。
+llama.cpp 在流式生成时检查 `is_connection_closed`，发现连接关闭就中止任务、释放槽位。
 网关在同一个 loop 线程上同步完成"发现下游断开 → 向上游发 FIN → 读完已到达的数据 → 关闭上游 fd"，中间没有线程切换和排队。验收时用 `GET :10010/slots` 看槽位的 `is_processing` 立即变为 false。
 
 ## 6. 重试、降级与熔断
@@ -179,8 +182,7 @@ llama.cpp 在流式生成时检查 `is_connection_closed`，发现连接关闭�
 | --- | --- | --- | --- |
 | DNS 失败 | 是 | 是 | |
 | 连接被拒 / 不可达 / 连接超时 | 是 | 是 | 典型场景：上游进程没启动 |
-| TLS 证书校验失败 | **否**，直接换下一个目标 | 是 | 重试同一目标没有意义 |
-| TLS 握手失败 / IO 错误 | 是 | 是 | |
+| 读写 IO 错误（ECONNRESET 等） | 是 | 是 | |
 | 复用连接在收到任何字节前断开 | 立即新建连接重发一次，**不计入**尝试次数 | 否 | [net-reactor.md §11](net-reactor.md#11-upstreampoolgw_http每-loop-一个) |
 | 响应头前断开 / ttft 超时 | 是 | 是 | |
 | HTTP 408、409、425 | 是 | 否 | |
@@ -204,7 +206,7 @@ for target in targets:                                 # 降级 = 换下一个�
 全部失败 → 按最后一次失败返回错误：
     最后一次是上游 HTTP 状态（429/5xx）→ 原样返回该状态码与错误体（跨协议时转换格式），保留上游的 Retry-After 头
     最后一次是超时（connect/ttft/total/precommit）→ 504
-    最后一次是其他传输失败（DNS、连接被拒、TLS、断开）→ 502
+    最后一次是其他传输失败（DNS、连接被拒、断开）→ 502
 ```
 
 - 退避：`delay = min(max_ms, base_ms × 2^(n-1)) × U(0.8, 1.2)`；有 Retry-After（秒或 HTTP-date）时 `delay = max(delay, retry_after)`。

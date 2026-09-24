@@ -5,6 +5,9 @@
 本目录是交给实现者的执行规格：基于 muduo 思路自研 Reactor，实现一个 OpenAI / Anthropic 兼容的 LLM 网关，
 并让 `~/DAgent` 只改配置即可通过网关访问模型。
 
+**范围：只做本地。** 所有上游都是本机的明文 HTTP 服务（Qwen3.6、Qwen3.8、fault_upstream），
+不接入任何远端/云端模型，不实现 TLS（原 G08 已移出范围，编号不复用）。配置里出现 `https://` 的 `base_url` 在加载时报错。
+
 ## 1. 要展示的能力
 
 | 功能 | 背后的后端能力 | 规格位置 |
@@ -19,7 +22,6 @@
 | 配额与截断 | Redis 共享日/月额度（多实例），准入拒绝，流式中超额直接截断 | [usage-ledger.md §5–6](usage-ledger.md#5-redis-配额) |
 | 数据库客户端 | libpq 异步接口与自研 RESP 客户端都挂在 Reactor 上 | [usage-ledger.md §3](usage-ledger.md#3-新模块-storegw_store依赖-gw_net) |
 | 精确计量 | token 用量全部取自上游报告（含取消、失败尝试的服务端消耗），拿不到就如实标记，绝不估算 | [policies.md §4](policies.md#4-token-计量) |
-| HTTPS 客户端 | 自己把 OpenSSL 集成进非阻塞 Reactor，不用 libcurl | [net-reactor.md §6](net-reactor.md#6-tls-传输) |
 | 双协议 | OpenAI Chat 与 Anthropic Messages 入口/上游任意组合，流式互转 | [protocol-translation.md](protocol-translation.md) |
 
 ## 2. 阅读顺序
@@ -27,7 +29,7 @@
 | 顺序 | 文档 | 解决的问题 |
 | --- | --- | --- |
 | 1 | [architecture.md](architecture.md) | 模块、依赖方向、线程模型、对象所有权、目录与构建目标 |
-| 2 | [net-reactor.md](net-reactor.md) | EventLoop / TcpConnection / Transport / TLS / Resolver / Connector / 连接池的接口与不变量 |
+| 2 | [net-reactor.md](net-reactor.md) | EventLoop / TcpConnection / Transport / Resolver / Connector / 连接池的接口与不变量 |
 | 3 | [http.md](http.md) | 服务端与客户端 HTTP/1.1 解析、chunked、SSE、路由、错误体 |
 | 4 | [proxy-session.md](proxy-session.md) | 一次代理请求的状态机：背压、取消、超时、重试、降级、熔断 |
 | 5 | [protocol-translation.md](protocol-translation.md) | OpenAI ↔ Anthropic 请求、响应、流事件的逐字段映射 |
@@ -55,7 +57,7 @@
 | 项 | 现状 | 动作 |
 | --- | --- | --- |
 | GCC 13.3 / CMake 3.28 / Ninja 1.11 | 已有 | — |
-| OpenSSL 头文件 | **缺** `libssl-dev`（只有运行库 3.0.13） | `sudo apt install -y libssl-dev`，G00 |
+| OpenSSL 头文件 | **缺** `libssl-dev`（只有运行库 3.0.13） | `sudo apt install -y libssl-dev`，G00（只用 libcrypto 的 SHA-256） |
 | spdlog / CLI11 | DAgent 已从 GitHub 拉过，网络可用 | FetchContent |
 | googletest | 未拉取 | FetchContent（v1.15.2） |
 | nlohmann/json | `~/DAgent/src/public/lib/nlohmann/` | 复制 vendor |
@@ -69,7 +71,6 @@
 | --- | --- | --- | --- |
 | Qwen3.6（主） | `~/LLM/run-qwen36.sh` / `~/LLM/stop-qwen36.sh` | `127.0.0.1:10010` | 别名 `Qwen3.6-35B-A3B`；4 槽 × 131072；同时提供 `/v1/chat/completions` 与 `/v1/messages`；服务端默认 temp 0.6，思考模式开启（流里有 `reasoning_content`） |
 | Qwen3.8（备） | `~/LLM/run-qwen.sh` / `~/LLM/stop-qwen.sh`（会停掉**所有** llama-server） | `127.0.0.1:10009` | fallback 目标 |
-| DeepSeek | 远端 | `https://api.deepseek.com` | 仅用于验证 TLS；需要 `DEEPSEEK_API_KEY` 环境变量 |
 | fault_upstream | 本项目构建产物 | `127.0.0.1:19000` | 故障注入 |
 
 已核实的 llama.cpp（5b59b83）行为，可直接用作验收场景：

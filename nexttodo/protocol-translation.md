@@ -168,7 +168,7 @@ stop_reason：`end_turn`/`stop_sequence`→stop、`max_tokens`→length、`tool_
 - 块 index `k` 从 0 开始，每打开一个新块加一；OpenAI 上游的工具参数可能与文本交错到达，按"切换块类型即关闭旧块"处理。
 - `message_start` 里的 token 数必须是上游报告的精确值（[policies.md §4.7](policies.md#47-其他用到-token-数的地方)）。
   `metering: llamacpp` 的上游在第一个 token 之前一定已经发过进度事件或 timings，所以 commit 时已知。
-  `final` 计量的 OpenAI 上游（DeepSeek 等）此时还不知道，写 0，精确值在 `message_delta.usage.input_tokens` 里给出。
+  `final` 计量的 OpenAI 上游（如 `qwen36-final`）此时还不知道，写 0，精确值在 `message_delta.usage.input_tokens` 里给出。
   **已知影响**：DAgent 的 anthropic provider 只从 `message_start` 读 prompt token。所以 `gw-claude` 背后如果是 `final` 计量的 OpenAI 上游，
   DAgent 会看到 0。背后是 Qwen3.6 时没有这个问题。
 - 不发 `ping`、不发 `signature_delta`（没有签名；DAgent 允许签名为空）。
