@@ -123,11 +123,8 @@ std::expected<std::shared_ptr<Config>, std::string> Config::load(const std::stri
             const json& s = j.at("stream");
             cfg->stream.high_water_bytes = s.value("high_water_bytes", cfg->stream.high_water_bytes);
             cfg->stream.stall = msOr(s, "stall_ms", cfg->stream.stall);
-        }
-        if (j.contains("tls")) {
-            const json& t = j.at("tls");
-            cfg->tls.verify_peer = t.value("verify_peer", true);
-            cfg->tls.ca_file = t.value("ca_file", "");
+            cfg->stream.downstream_sndbuf_bytes =
+                s.value("downstream_sndbuf_bytes", cfg->stream.downstream_sndbuf_bytes);
         }
         if (j.contains("dns")) {
             cfg->dns.cache_ttl_seconds = j.at("dns").value("cache_ttl_seconds", 60);
@@ -167,6 +164,10 @@ std::expected<std::shared_ptr<Config>, std::string> Config::load(const std::stri
                     return std::unexpected("upstream " + name + ": unknown kind " + up.kind);
                 }
                 std::string base_url = u.at("base_url").get<std::string>();
+                if (base_url.starts_with("https://")) {
+                    return std::unexpected("upstream " + name + ": https is not supported (local plaintext upstreams only): " +
+                                           base_url);
+                }
                 auto url = http::parseBaseUrl(base_url);
                 if (!url) return std::unexpected("upstream " + name + ": invalid base_url " + base_url);
                 up.url = *url;

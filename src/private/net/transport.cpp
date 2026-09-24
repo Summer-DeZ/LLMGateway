@@ -8,6 +8,10 @@
 
 namespace gw::net {
 
+PlainTransport::~PlainTransport() {
+    if (fd_ >= 0) ::close(fd_);
+}
+
 IoResult PlainTransport::readInto(Buffer& in) {
     int saved_errno = 0;
     ssize_t n = in.readFd(fd_, &saved_errno);

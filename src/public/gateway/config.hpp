@@ -105,11 +105,8 @@ struct LogConfig {
 struct StreamConfig {
     std::size_t high_water_bytes = 262144;
     std::chrono::milliseconds stall{60000};
-};
-
-struct TlsConfig {
-    bool verify_peer = true;
-    std::string ca_file;
+    // 下游连接的 SO_SNDBUF；0 表示不设置（交给内核自动调优）
+    int downstream_sndbuf_bytes = 65536;
 };
 
 struct DnsConfig {
@@ -154,7 +151,6 @@ struct Config {
     ShutdownConfig shutdown;
     LogConfig log;
     StreamConfig stream;
-    TlsConfig tls;
     DnsConfig dns;
     CacheConfig cache;
 

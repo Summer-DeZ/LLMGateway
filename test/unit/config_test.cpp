@@ -91,6 +91,28 @@ TEST(ConfigTest, UnknownUpstreamReferenceFails) {
     EXPECT_NE(cfg.error().find("nope"), std::string::npos);
 }
 
+TEST(ConfigTest, HttpsUpstreamRejected) {
+    TempFile file(R"({
+        "upstreams": { "remote": { "kind": "openai-chat", "base_url": "https://api.example.com/v1", "model": "m" } },
+        "models": { "m": { "targets": ["remote"] } }
+    })");
+    auto cfg = gw::gateway::Config::load(file.path());
+    ASSERT_FALSE(cfg.has_value());
+    EXPECT_NE(cfg.error().find("remote"), std::string::npos);
+    EXPECT_NE(cfg.error().find("https"), std::string::npos);
+}
+
+TEST(ConfigTest, DownstreamSendBuffer) {
+    TempFile file(R"({
+        "stream": { "downstream_sndbuf_bytes": 0 },
+        "upstreams": { "up1": { "kind": "openai-chat", "base_url": "http://127.0.0.1:10010/v1", "model": "m" } },
+        "models": { "qwen": { "targets": ["up1"] } }
+    })");
+    auto cfg = gw::gateway::Config::load(file.path());
+    ASSERT_TRUE(cfg.has_value()) << cfg.error();
+    EXPECT_EQ((*cfg)->stream.downstream_sndbuf_bytes, 0);
+}
+
 TEST(ConfigTest, MeteringConstraint) {
     TempFile file(R"({
         "upstreams": {

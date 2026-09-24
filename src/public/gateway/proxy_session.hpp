@@ -65,7 +65,8 @@ public:
 
 private:
     void admit();
-    void startAttempt();
+    // allow_idle=false：复用连接首字节前失败后的重发，一定新建连接
+    void startAttempt(bool allow_idle = true);
     void onAcquire(std::expected<http::Lease, http::AcquireError> result);
     void onUpstreamHead(int status, const http::Headers& headers);
     void onUpstreamBody(std::string_view data);
@@ -74,9 +75,8 @@ private:
     void handleSseEvent(http::SseEvent&& event);
     void handleNonStreamBody();
     void commitStream();
-    void drainUpstream(const std::function<void(std::string_view)>& on_data,
-                       const std::function<void()>& on_shutdown = {});
-    void feedMeterOnly(std::string_view data);
+    // 结束当前尝试：SHUT_WR → 读出已到达的字节只喂计量 → 关闭（proxy-session.md §5.2）
+    void abortUpstream(const std::function<void()>& on_shutdown = {});
 
     void failAttempt(int status, std::string message, bool close);
     void failCommitted(int status, const std::string& message);
@@ -89,8 +89,8 @@ private:
     void startStallTimer();
     void startTotalTimer();
     void startPrecommitTimer();
+    void cancelTimer(net::TimerId& id);
     void cancelTimers();
-    std::chrono::milliseconds timeoutMs(std::chrono::milliseconds fallback, int which) const;
 
     net::TcpConnectionPtr downstream();
     void logRecord();
@@ -105,11 +105,9 @@ private:
     const ModelConfig* route_ = nullptr;
     const UpstreamConfig* target_ = nullptr;
     http::UpstreamKey key_;
-    std::string upstream_body_;
 
     std::shared_ptr<http::AcquireHandle> acquire_handle_;
     std::shared_ptr<http::UpstreamExchange> exchange_;
-    http::Lease lease_;
     std::unique_ptr<UsageMeter> meter_;
     std::unique_ptr<proto::OpenAiStreamObserver> stream_observer_;
     http::SseParser sse_parser_;
@@ -118,6 +116,8 @@ private:
     http::Headers upstream_headers_;
     int attempts_ = 1;
     bool upstream_reusable_ = false;
+    bool reuse_retried_ = false;
+    bool in_sse_feed_ = false;
 
     Stage stage_ = Stage::admitting;
     Outcome outcome_ = Outcome::ok;

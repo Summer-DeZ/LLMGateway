@@ -12,9 +12,6 @@ Channel::Channel(EventLoop* loop, int fd) : loop_(loop), fd_(fd) {}
 Channel::~Channel() {
     assert(!event_handling_);
     assert(!added_to_poller_);
-    if (loop_->isInLoopThread()) {
-        assert(!loop_->context().has_value() || true);
-    }
 }
 
 void Channel::tie(const std::shared_ptr<void>& obj) {

@@ -20,10 +20,8 @@ public:
     void handle(const http::HttpRequest& request, const net::TcpConnectionPtr& conn);
     // 下游连接关闭：取消进行中的会话
     void onConnectionClosed(const net::TcpConnectionPtr& conn);
-    void onHighWater(const net::TcpConnectionPtr& conn, std::size_t mark);
-    void onWriteComplete(const net::TcpConnectionPtr& conn);
-
-    std::size_t activeSessions() const { return context_.active_sessions.load(); }
+    // 退出超时：取消所有进行中的会话（与客户端断开同一路径）。只能在 base loop 线程上调用，取消在各 io loop 上异步执行
+    void cancelAll(const std::string& reason);
 
 private:
     void handleProxy(proto::Protocol protocol, const http::HttpRequest& request,

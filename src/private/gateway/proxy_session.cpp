@@ -1,7 +1,5 @@
 #include "gateway/proxy_session.hpp"
 
-#include <algorithm>
-
 #include "base/log.hpp"
 #include "gateway/usage_meter.hpp"
 #include "http/response_writer.hpp"
@@ -91,7 +89,7 @@ void ProxySession::admit() {
     startAttempt();
 }
 
-void ProxySession::startAttempt() {
+void ProxySession::startAttempt(bool allow_idle) {
     const std::string& target_name = route_->targets.front();
     target_ = context_.config->findUpstream(target_name);
     if (target_ == nullptr) {
@@ -101,7 +99,7 @@ void ProxySession::startAttempt() {
         finish(Outcome::unavailable);
         return;
     }
-    key_ = http::UpstreamKey{target_->url.tls, target_->url.host, target_->url.port};
+    key_ = http::UpstreamKey{target_->url.host, target_->url.port};
     if (!meter_) meter_ = std::make_unique<UsageMeter>(target_->metering);
 
     auto conn = downstream();
@@ -119,10 +117,12 @@ void ProxySession::startAttempt() {
 
     stage_ = Stage::acquiring;
     std::weak_ptr<ProxySession> weak = shared_from_this();
-    acquire_handle_ = pool->acquire(key_, target_->timeouts.connect,
-                                    [weak](std::expected<http::Lease, http::AcquireError> result) {
-                                        if (auto self = weak.lock()) self->onAcquire(std::move(result));
-                                    });
+    acquire_handle_ = pool->acquire(
+        key_, target_->timeouts.connect,
+        [weak](std::expected<http::Lease, http::AcquireError> result) {
+            if (auto self = weak.lock()) self->onAcquire(std::move(result));
+        },
+        allow_idle);
 }
 
 void ProxySession::onAcquire(std::expected<http::Lease, http::AcquireError> result) {
@@ -146,10 +146,9 @@ void ProxySession::onAcquire(std::expected<http::Lease, http::AcquireError> resu
         return;
     }
 
-    lease_ = std::move(*result);
-    upstream_body_ = proto::rewriteOpenAiRequest(request_json_, target_->model, target_->metering,
-                                                 target_->extra_body, meta_.stream)
-                         .dump();
+    std::string upstream_body = proto::rewriteOpenAiRequest(request_json_, target_->model, target_->metering,
+                                                            target_->extra_body, meta_.stream)
+                                    .dump();
 
     http::UpstreamRequest request;
     request.method = "POST";
@@ -159,7 +158,7 @@ void ProxySession::onAcquire(std::expected<http::Lease, http::AcquireError> resu
     if (meta_.stream) request.headers.emplace_back("accept", "text/event-stream");
     if (!target_->api_key.empty()) request.headers.emplace_back("authorization", "Bearer " + target_->api_key);
     request.headers.emplace_back("x-request-id", ingress_.request_id);
-    request.body = upstream_body_;
+    request.body = std::move(upstream_body);
 
     if (meta_.stream) {
         stream_observer_ = std::make_unique<proto::OpenAiStreamObserver>(meter_.get(), meta_.client_wants_usage,
@@ -169,7 +168,7 @@ void ProxySession::onAcquire(std::expected<http::Lease, http::AcquireError> resu
     stage_ = Stage::await_head;
     std::weak_ptr<ProxySession> weak = shared_from_this();
     exchange_ = std::make_shared<http::UpstreamExchange>(
-        std::move(lease_), target_->url, std::move(request),
+        std::move(*result), target_->url, std::move(request),
         http::UpstreamExchange::Handler{
             .on_head = [weak](int status, const http::Headers& headers) {
                 if (auto self = weak.lock()) self->onUpstreamHead(status, headers);
@@ -191,10 +190,8 @@ void ProxySession::onAcquire(std::expected<http::Lease, http::AcquireError> resu
 void ProxySession::startTtftTimer() {
     auto conn = downstream();
     if (!conn) return;
-    net::EventLoop* loop = conn->getLoop();
-    auto limit = timeoutMs(target_ ? target_->timeouts.ttft : std::chrono::milliseconds(90000), 1);
     std::weak_ptr<ProxySession> weak = shared_from_this();
-    ttft_timer_ = loop->runAfter(limit, [weak] {
+    ttft_timer_ = conn->getLoop()->runAfter(target_->timeouts.ttft, [weak] {
         auto self = weak.lock();
         if (!self || self->finished_) return;
         SPDLOG_DEBUG("proxy: ttft timeout request_id={} stage={}", self->ingress_.request_id, toString(self->stage_));
@@ -205,11 +202,11 @@ void ProxySession::startTtftTimer() {
 void ProxySession::startIdleTimer() {
     auto conn = downstream();
     if (!conn) return;
-    net::EventLoop* loop = conn->getLoop();
-    auto limit = timeoutMs(target_ ? target_->timeouts.idle : std::chrono::milliseconds(60000), 2);
-    if (idle_timer_.valid()) loop->cancel(idle_timer_);
+    cancelTimer(idle_timer_);
+    // 背压暂停期间停表：是我们自己不读，不是上游卡住（proxy-session.md §4.2）；恢复读时重新计时
+    if (backpressure_paused_) return;
     std::weak_ptr<ProxySession> weak = shared_from_this();
-    idle_timer_ = loop->runAfter(limit, [weak] {
+    idle_timer_ = conn->getLoop()->runAfter(target_->timeouts.idle, [weak] {
         auto self = weak.lock();
         if (!self || self->finished_) return;
         SPDLOG_DEBUG("proxy: idle timeout request_id={} committed={}", self->ingress_.request_id, self->committed_);
@@ -228,28 +225,24 @@ void ProxySession::startIdleTimer() {
 void ProxySession::startStallTimer() {
     auto conn = downstream();
     if (!conn) return;
-    net::EventLoop* loop = conn->getLoop();
     std::weak_ptr<ProxySession> weak = shared_from_this();
-    stall_timer_ = loop->runAfter(context_.config->stream.stall, [weak] {
+    stall_timer_ = conn->getLoop()->runAfter(context_.config->stream.stall, [weak] {
         auto self = weak.lock();
         if (!self || self->finished_) return;
         SPDLOG_WARN("proxy: downstream_stalled request_id={} paused_for={}ms", self->ingress_.request_id,
                     std::chrono::duration_cast<std::chrono::milliseconds>(nowSteady() - self->pause_start_).count());
-        if (self->exchange_) {
-            self->drainUpstream([self](std::string_view data) { self->feedMeterOnly(data); });
-        }
-        if (auto c = self->downstream()) c->forceClose();
+        self->abortUpstream();
         self->finish(Outcome::downstream_stalled);
+        // 先 finish 再关下游：关闭会同步触发下游 close 回调，会话已结束就不会再被记成 cancelled
+        if (auto c = self->downstream()) c->forceClose();
     });
 }
 
 void ProxySession::startTotalTimer() {
     auto conn = downstream();
     if (!conn) return;
-    net::EventLoop* loop = conn->getLoop();
-    auto limit = timeoutMs(target_ ? target_->timeouts.total : std::chrono::milliseconds(600000), 3);
     std::weak_ptr<ProxySession> weak = shared_from_this();
-    total_timer_ = loop->runAfter(limit, [weak] {
+    total_timer_ = conn->getLoop()->runAfter(target_->timeouts.total, [weak] {
         auto self = weak.lock();
         if (!self || self->finished_) return;
         self->failAttempt(504, "upstream total timeout", true);
@@ -259,15 +252,14 @@ void ProxySession::startTotalTimer() {
 void ProxySession::startPrecommitTimer() {
     auto conn = downstream();
     if (!conn) return;
-    net::EventLoop* loop = conn->getLoop();
     std::chrono::milliseconds limit{100000};
-    if (route_ && !route_->targets.empty()) {
+    if (!route_->targets.empty()) {
         if (auto* upstream = context_.config->findUpstream(route_->targets.front())) {
             limit = upstream->timeouts.precommit;
         }
     }
     std::weak_ptr<ProxySession> weak = shared_from_this();
-    precommit_timer_ = loop->runAfter(limit, [weak] {
+    precommit_timer_ = conn->getLoop()->runAfter(limit, [weak] {
         auto self = weak.lock();
         if (!self || self->finished_ || self->committed_) return;
         SPDLOG_DEBUG("proxy: precommit timeout request_id={}", self->ingress_.request_id);
@@ -275,25 +267,15 @@ void ProxySession::startPrecommitTimer() {
     });
 }
 
-std::chrono::milliseconds ProxySession::timeoutMs(std::chrono::milliseconds fallback, int which) const {
-    if (target_ == nullptr) return fallback;
-    switch (which) {
-        case 1: return target_->timeouts.ttft;
-        case 2: return target_->timeouts.idle;
-        case 3: return target_->timeouts.total;
-        default: return fallback;
-    }
+void ProxySession::cancelTimer(net::TimerId& id) {
+    if (!id.valid()) return;
+    if (auto conn = downstream()) conn->getLoop()->cancel(id);
+    id = net::TimerId{};
 }
 
 void ProxySession::cancelTimers() {
-    auto conn = downstream();
-    net::EventLoop* loop = conn ? conn->getLoop() : nullptr;
-    if (loop == nullptr) return;
     for (net::TimerId* id : {&ttft_timer_, &idle_timer_, &stall_timer_, &total_timer_, &precommit_timer_}) {
-        if (id->valid()) {
-            loop->cancel(*id);
-            *id = net::TimerId{};
-        }
+        cancelTimer(*id);
     }
 }
 
@@ -307,10 +289,7 @@ void ProxySession::onUpstreamHead(int status, const http::Headers& headers) {
         return;
     }
     if (!meta_.stream) {
-        if (ttft_timer_.valid()) {
-            if (auto conn = downstream()) conn->getLoop()->cancel(ttft_timer_);
-            ttft_timer_ = net::TimerId{};
-        }
+        cancelTimer(ttft_timer_);
         startTotalTimer();
     }
 }
@@ -329,8 +308,11 @@ void ProxySession::onUpstreamBody(std::string_view data) {
         nonstream_body_.append(data);
         return;
     }
-    if (idle_timer_.valid() || committed_) startIdleTimer();
+    // 收到首个进度事件后 ttft 改按 idle 计时，每次收到字节重置（proxy-session.md §3）
+    if (first_progress_seen_ || committed_) startIdleTimer();
+    in_sse_feed_ = true;
     sse_parser_.feed(data, [this](http::SseEvent&& event) { handleSseEvent(std::move(event)); });
+    in_sse_feed_ = false;
 }
 
 void ProxySession::handleSseEvent(http::SseEvent&& event) {
@@ -338,12 +320,13 @@ void ProxySession::handleSseEvent(http::SseEvent&& event) {
     auto result = stream_observer_->process(event.data);
     switch (result.action) {
         case proto::OpenAiStreamObserver::Result::Action::drop:
+            if (!committed_ && meter_ && meter_->value().prompt_computed) {
+                SPDLOG_DEBUG("proxy: progress request_id={} computed={}", ingress_.request_id,
+                             *meter_->value().prompt_computed);
+            }
             if (!committed_ && stream_observer_->sawProgress() && !first_progress_seen_) {
                 first_progress_seen_ = true;
-                if (ttft_timer_.valid()) {
-                    if (auto conn = downstream()) conn->getLoop()->cancel(ttft_timer_);
-                    ttft_timer_ = net::TimerId{};
-                }
+                cancelTimer(ttft_timer_);
                 startIdleTimer();
             }
             return;
@@ -384,10 +367,7 @@ void ProxySession::commitStream() {
     committed_ = true;
     stage_ = Stage::streaming;
     http_status_ = 200;
-    if (ttft_timer_.valid()) {
-        if (auto conn = downstream()) conn->getLoop()->cancel(ttft_timer_);
-        ttft_timer_ = net::TimerId{};
-    }
+    cancelTimer(ttft_timer_);
     startIdleTimer();
     http::Headers headers;
     headers.emplace_back("x-gateway-upstream", target_ ? target_->name : "");
@@ -463,9 +443,20 @@ void ProxySession::onUpstreamComplete(bool reusable) {
 
 void ProxySession::onUpstreamError(http::UpstreamIoError error) {
     if (finished_) return;
+    // 复用的空闲连接在收到任何响应字节前断开：对端恰好关闭了空闲连接。换新连接重发一次，
+    // 不计尝试次数、不计熔断（net-reactor.md §11）。回调来自 exchange 自身，调用方持有它的强引用，这里可以释放
+    if (error.kind == http::UpstreamIoError::Kind::closed_before_head && !reuse_retried_ && exchange_ &&
+        exchange_->lease().reused && !exchange_->receivedAnyByte()) {
+        reuse_retried_ = true;
+        SPDLOG_DEBUG("proxy: reused connection failed before first byte, resending on a new connection request_id={}",
+                     ingress_.request_id);
+        cancelTimer(ttft_timer_);
+        exchange_.reset();
+        startAttempt(false);
+        return;
+    }
     if (!committed_) {
-        bool timeout = error.kind == http::UpstreamIoError::Kind::parse_error && error.message.find("timeout") != std::string::npos;
-        failAttempt(timeout ? 504 : 502, error.message, true);
+        failAttempt(502, error.message, true);
         return;
     }
     failCommitted(502, error.message);
@@ -473,6 +464,7 @@ void ProxySession::onUpstreamError(http::UpstreamIoError error) {
 
 void ProxySession::failCommitted(int status, const std::string& message) {
     if (finished_) return;
+    abortUpstream();
     finalizeMeter(false);
     if (meta_.stream) {
         nlohmann::json err;
@@ -490,15 +482,36 @@ void ProxySession::failCommitted(int status, const std::string& message) {
     finish(Outcome::stream_interrupted);
 }
 
-void ProxySession::drainUpstream(const std::function<void(std::string_view)>& on_data,
-                                const std::function<void()>& on_shutdown) {
-    if (exchange_) exchange_->abortAndDrain(on_data, on_shutdown);
-}
-
-void ProxySession::feedMeterOnly(std::string_view data) {
-    sse_parser_.feed(data, [this](http::SseEvent&& event) {
-        if (stream_observer_) stream_observer_->process(event.data);
-    });
+void ProxySession::abortUpstream(const std::function<void()>& on_shutdown) {
+    if (!exchange_ || exchange_->finished()) {
+        if (on_shutdown) on_shutdown();
+        return;
+    }
+    if (in_sse_feed_ || !stream_observer_) {
+        // 正处在上游数据的 SSE 解析回调里（流内 error 事件）不能重入解析器；非流式响应体只在完整时才有 usage。
+        // 这两种情况直接关闭，不排空
+        exchange_->forceClose();
+        if (on_shutdown) on_shutdown();
+        return;
+    }
+    // 排空的数据可能接近 1MB（下游或本 loop 落后时上游已发出大量 token），在 loop 线程里逐事件解析 JSON 代价太高。
+    // 上游的计数（timings / usage / prompt_progress）都是累计值，所以只扫描 SSE 分帧、记下最后一个 JSON 事件，
+    // 排空结束后只把它交给计量，结果与逐事件处理相同
+    std::string last_event;
+    exchange_->abortAndDrain(
+        [this, &last_event](std::string_view data) {
+            sse_parser_.feed(data, [&last_event](http::SseEvent&& event) {
+                if (event.data != "[DONE]") last_event = std::move(event.data);
+            });
+        },
+        on_shutdown);
+    if (!last_event.empty()) {
+        stream_observer_->process(last_event);
+        const auto& usage = meter_->value();
+        SPDLOG_DEBUG("proxy: drained request_id={} computed={} completion={}", ingress_.request_id,
+                     usage.prompt_computed ? std::to_string(*usage.prompt_computed) : "null",
+                     usage.completion ? std::to_string(*usage.completion) : "null");
+    }
 }
 
 void ProxySession::finalizeMeter(bool completed) {
@@ -510,6 +523,7 @@ void ProxySession::finalizeMeter(bool completed) {
 
 void ProxySession::failAttempt(int status, std::string message, bool close) {
     if (finished_) return;
+    abortUpstream();
     if (meter_) {
         const auto& usage = meter_->value();
         if (!usage.prompt && !usage.completion && !usage.cached && !usage.prompt_computed) {
@@ -552,11 +566,7 @@ void ProxySession::cancel(std::string reason) {
         case Stage::await_head:
         case Stage::await_first_event:
         case Stage::streaming:
-            if (exchange_) {
-                drainUpstream([this](std::string_view data) { feedMeterOnly(data); }, mark_latency);
-            } else {
-                mark_latency();
-            }
+            abortUpstream(mark_latency);
             break;
         case Stage::backoff:
         case Stage::admitting:
@@ -576,6 +586,7 @@ void ProxySession::onDownstreamHighWater(std::size_t mark) {
     backpressure_pauses_ += 1;
     pause_start_ = nowSteady();
     exchange_->pauseReading();
+    cancelTimer(idle_timer_);
     startStallTimer();
     SPDLOG_DEBUG("proxy: backpressure pause request_id={} output={} (pause #{})", ingress_.request_id, mark,
                  backpressure_pauses_);
@@ -585,11 +596,9 @@ void ProxySession::onDownstreamWriteComplete() {
     if (finished_ || !exchange_ || !backpressure_paused_) return;
     backpressure_paused_ = false;
     backpressure_total_ += nowSteady() - pause_start_;
-    if (stall_timer_.valid()) {
-        if (auto conn = downstream()) conn->getLoop()->cancel(stall_timer_);
-        stall_timer_ = net::TimerId{};
-    }
+    cancelTimer(stall_timer_);
     exchange_->resumeReading();
+    startIdleTimer();
     SPDLOG_DEBUG("proxy: backpressure resume request_id={}", ingress_.request_id);
 }
 

@@ -18,16 +18,8 @@ std::optional<std::uint16_t> parsePort(std::string_view s) {
 
 std::optional<UrlParts> parseBaseUrl(std::string_view url) {
     UrlParts out;
-    if (url.starts_with("https://")) {
-        out.tls = true;
-        out.port = 443;
-        url.remove_prefix(8);
-    } else if (url.starts_with("http://")) {
-        out.port = 80;
-        url.remove_prefix(7);
-    } else {
-        return std::nullopt;
-    }
+    if (!url.starts_with("http://")) return std::nullopt;
+    url.remove_prefix(7);
     if (url.empty()) return std::nullopt;
 
     auto slash = url.find('/');

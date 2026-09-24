@@ -6,11 +6,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+# 可执行文件统一输出到 build/<preset>/
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
 option(GW_BUILD_TESTS "Build unit tests and fault upstream" ON)
 
 find_package(Threads REQUIRED)
-find_package(OpenSSL 3.0 REQUIRED)
+find_package(OpenSSL 3.0 REQUIRED COMPONENTS Crypto)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PQ REQUIRED IMPORTED_TARGET libpq)
 

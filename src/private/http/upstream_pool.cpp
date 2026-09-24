@@ -5,7 +5,6 @@
 #include <algorithm>
 
 #include "base/log.hpp"
-#include "net/tls.hpp"
 #include "net/transport.hpp"
 
 namespace gw::http {
@@ -23,9 +22,8 @@ void AcquireHandle::cancelConnector() {
     }
 }
 
-UpstreamPool::UpstreamPool(net::EventLoop* loop, net::Resolver* resolver, net::TlsContext* tls_context,
-                           PoolOptions options)
-    : loop_(loop), resolver_(resolver), tls_context_(tls_context), options_(options) {}
+UpstreamPool::UpstreamPool(net::EventLoop* loop, net::Resolver* resolver, PoolOptions options)
+    : loop_(loop), resolver_(resolver), options_(std::move(options)) {}
 
 UpstreamPool::~UpstreamPool() {
     closeAll();
@@ -112,27 +110,27 @@ void UpstreamPool::closeAll() {
 
 std::shared_ptr<AcquireHandle> UpstreamPool::acquire(const UpstreamKey& key,
                                                      std::chrono::milliseconds connect_timeout,
-                                                     std::function<void(std::expected<Lease, AcquireError>)> cb) {
+                                                     std::function<void(std::expected<Lease, AcquireError>)> cb,
+                                                     bool allow_idle) {
     loop_->assertInLoopThread();
     pending_connectors_.erase(std::remove_if(pending_connectors_.begin(), pending_connectors_.end(),
                                              [](const std::shared_ptr<net::Connector>& c) { return c->finished(); }),
                               pending_connectors_.end());
     auto handle = std::make_shared<AcquireHandle>();
 
-    if (auto conn = takeIdle(key)) {
-        Lease lease;
-        lease.conn = conn;
-        lease.key = key;
-        lease.reused = true;
-        cb(std::expected<Lease, AcquireError>(std::move(lease)));
-        return handle;
+    if (allow_idle) {
+        if (auto conn = takeIdle(key)) {
+            Lease lease;
+            lease.conn = conn;
+            lease.key = key;
+            lease.reused = true;
+            cb(std::expected<Lease, AcquireError>(std::move(lease)));
+            return handle;
+        }
     }
 
-    Timestamp start = nowSteady();
-    std::weak_ptr<UpstreamPool> weak_pool;
     resolver_->resolve(key.host, key.port, loop_,
-                       [this, key, connect_timeout, handle, cb = std::move(cb), start](
-                           net::Resolver::Result result) mutable {
+                       [this, key, connect_timeout, handle, cb = std::move(cb)](net::Resolver::Result result) mutable {
                            if (handle->cancelled()) {
                                cb(std::unexpected(AcquireError{AcquireError::Kind::cancelled, "cancelled"}));
                                return;
@@ -142,7 +140,6 @@ std::shared_ptr<AcquireHandle> UpstreamPool::acquire(const UpstreamKey& key,
                                return;
                            }
                            startConnect(key, connect_timeout, handle, std::move(cb), std::move(*result));
-                           (void)start;
                        });
     return handle;
 }
@@ -158,40 +155,21 @@ void UpstreamPool::startConnect(const UpstreamKey& key, std::chrono::millisecond
 
     // 两个 lambda 都持有 cb，必须共享同一个可调用对象（否则先构造的会把 cb 移空）
     auto shared_cb = std::make_shared<std::function<void(std::expected<Lease, AcquireError>)>>(std::move(cb));
-
     std::weak_ptr<net::Connector> weak_connector = connector;
+    auto forget_connector = [this, weak_connector] {
+        if (auto c = weak_connector.lock()) {
+            pending_connectors_.erase(std::remove(pending_connectors_.begin(), pending_connectors_.end(), c),
+                                      pending_connectors_.end());
+        }
+    };
+
     connector->start(
-        [this, key, handle, shared_cb, start, weak_connector](int fd, net::InetAddress peer) mutable {
-            auto& cb = *shared_cb;
-            if (auto c = weak_connector.lock()) {
-                pending_connectors_.erase(std::remove(pending_connectors_.begin(), pending_connectors_.end(), c),
-                                          pending_connectors_.end());
-            }
+        [this, key, handle, shared_cb, start, forget_connector](int fd, net::InetAddress peer) {
+            forget_connector();
             if (handle->cancelled()) {
                 ::close(fd);
-                cb(std::unexpected(AcquireError{AcquireError::Kind::cancelled, "cancelled"}));
+                (*shared_cb)(std::unexpected(AcquireError{AcquireError::Kind::cancelled, "cancelled"}));
                 return;
-            }
-            Duration connect_time = nowSteady() - start;
-
-            std::unique_ptr<net::Transport> transport;
-            Duration tls_time{};
-            bool tls_resumed = false;
-            if (key.tls) {
-                if (tls_context_ == nullptr) {
-                    ::close(fd);
-                    cb(std::unexpected(AcquireError{AcquireError::Kind::tls_handshake, "TLS not available"}));
-                    return;
-                }
-                auto tls = tls_context_->createTransport(fd, key.host, key.port);
-                if (!tls) {
-                    ::close(fd);
-                    cb(std::unexpected(AcquireError{AcquireError::Kind::tls_handshake, tls.error()}));
-                    return;
-                }
-                transport = std::move(*tls);
-            } else {
-                transport = std::make_unique<net::PlainTransport>(fd);
             }
 
             net::InetAddress local;
@@ -205,41 +183,21 @@ void UpstreamPool::startConnect(const UpstreamKey& key, std::chrono::millisecond
                 }
             }
 
-            auto conn = std::make_shared<net::TcpConnection>(loop_, "up#" + key.host + ":" +
-                                                                        std::to_string(key.port),
-                                                             fd, local, peer, std::move(transport));
+            auto conn = std::make_shared<net::TcpConnection>(loop_, "up#" + key.host + ":" + std::to_string(key.port),
+                                                             fd, local, peer,
+                                                             std::make_unique<net::PlainTransport>(fd));
             conn->setTcpNoDelay(true);
-            Timestamp connect_done = nowSteady();
-            conn->setConnectionCallback(
-                [this, key, handle, cb = std::move(cb), connect_time, start, conn,
-                 connect_done](const net::TcpConnectionPtr& c) mutable {
-                    if (!c->connected()) return;
-                    Duration tls_time = nowSteady() - connect_done;
-                    bool tls_resumed = c->tlsResumed();
-                    if (handle->cancelled()) {
-                        c->forceClose();
-                        cb(std::unexpected(AcquireError{AcquireError::Kind::cancelled, "cancelled"}));
-                        return;
-                    }
-                    Lease lease;
-                    lease.conn = c;
-                    lease.key = key;
-                    lease.reused = false;
-                    lease.connect_time = connect_time;
-                    lease.tls_time = tls_time;
-                    lease.tls_resumed = tls_resumed;
-                    (void)start;
-                    cb(std::expected<Lease, AcquireError>(std::move(lease)));
-                });
-            conn->setCloseCallback([](const net::TcpConnectionPtr&) {});
             conn->connectEstablished();
+
+            Lease lease;
+            lease.conn = conn;
+            lease.key = key;
+            lease.reused = false;
+            lease.connect_time = nowSteady() - start;
+            (*shared_cb)(std::expected<Lease, AcquireError>(std::move(lease)));
         },
-        [this, handle, shared_cb, weak_connector](net::ConnectError error) mutable {
-            auto& cb = *shared_cb;
-            if (auto c = weak_connector.lock()) {
-                pending_connectors_.erase(std::remove(pending_connectors_.begin(), pending_connectors_.end(), c),
-                                          pending_connectors_.end());
-            }
+        [shared_cb, forget_connector](net::ConnectError error) {
+            forget_connector();
             AcquireError::Kind kind = AcquireError::Kind::connect_refused;
             switch (error.kind) {
                 case net::ConnectErrorKind::timeout: kind = AcquireError::Kind::connect_timeout; break;
@@ -248,8 +206,7 @@ void UpstreamPool::startConnect(const UpstreamKey& key, std::chrono::millisecond
                 case net::ConnectErrorKind::refused:
                 case net::ConnectErrorKind::unreachable: kind = AcquireError::Kind::connect_refused; break;
             }
-            cb(std::unexpected(AcquireError{kind, error.message}));
-            (void)handle;
+            (*shared_cb)(std::unexpected(AcquireError{kind, error.message}));
         });
 }
 

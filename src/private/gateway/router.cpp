@@ -60,12 +60,13 @@ void Router::handle(const http::HttpRequest& request, const net::TcpConnectionPt
         return;
     }
 
-    if (path == "/v1/chat/completions" || path == "/v1/messages") {
+    // /v1/messages（Anthropic 入口）在 G14 实现之前按未知路径处理
+    if (path == "/v1/chat/completions") {
         if (request.method != "POST") {
             methodNotAllowed(request, conn, "POST");
             return;
         }
-        proto::Protocol protocol = path == "/v1/messages" ? proto::Protocol::anthropic : proto::Protocol::openai;
+        proto::Protocol protocol = proto::Protocol::openai;
         auto auth = authenticate(*context_.config, request);
         if (auth.user == nullptr) {
             http::ResponseWriter writer(conn, gw::randomHex(16), request.keepAlive());
@@ -148,12 +149,10 @@ void Router::onConnectionClosed(const net::TcpConnectionPtr& conn) {
     }
 }
 
-void Router::onHighWater(const net::TcpConnectionPtr& conn, std::size_t mark) {
-    if (auto session = sessionOf(conn)) session->onDownstreamHighWater(mark);
-}
-
-void Router::onWriteComplete(const net::TcpConnectionPtr& conn) {
-    if (auto session = sessionOf(conn)) session->onDownstreamWriteComplete();
+void Router::cancelAll(const std::string& reason) {
+    server_.forEachConnection([reason](const net::TcpConnectionPtr& conn) {
+        if (auto session = sessionOf(conn)) session->cancel(reason);
+    });
 }
 
 }  // namespace gw::gateway

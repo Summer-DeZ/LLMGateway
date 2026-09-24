@@ -16,7 +16,7 @@ TcpConnection::TcpConnection(EventLoop* loop, std::string name, int sockfd, Inet
                              InetAddress peer_addr, std::unique_ptr<Transport> transport)
     : loop_(loop),
       name_(std::move(name)),
-      state_(State::kHandshaking),
+      state_(State::kConnecting),
       reading_(true),
       transport_(std::move(transport)),
       channel_(loop, sockfd),
@@ -39,33 +39,11 @@ void TcpConnection::setState(State state) {
 
 void TcpConnection::connectEstablished() {
     loop_->assertInLoopThread();
-    assert(state_ == State::kHandshaking);
+    assert(state_ == State::kConnecting);
+    setState(State::kConnected);
     channel_.tie(shared_from_this());
-    handleHandshake();
-}
-
-void TcpConnection::handleHandshake() {
-    HandshakeStatus status = transport_->handshake();
-    switch (status) {
-        case HandshakeStatus::done:
-            setState(State::kConnected);
-            channel_.enableReading();
-            if (connection_callback_) connection_callback_(shared_from_this());
-            break;
-        case HandshakeStatus::want_read:
-            channel_.enableReading();
-            break;
-        case HandshakeStatus::want_write:
-            channel_.enableWriting();
-            break;
-        case HandshakeStatus::failed:
-            last_error_ = transport_->lastError();
-            setState(State::kDisconnected);
-            channel_.disableAll();
-            if (connection_callback_) connection_callback_(shared_from_this());
-            if (close_callback_) close_callback_(shared_from_this());
-            break;
-    }
+    channel_.enableReading();
+    if (connection_callback_) connection_callback_(shared_from_this());
 }
 
 void TcpConnection::connectDestroyed() {
@@ -114,7 +92,7 @@ void TcpConnection::sendBufferInLoop(Buffer* buf) {
 
 void TcpConnection::sendInLoop(std::string_view data) {
     loop_->assertInLoopThread();
-    if (state_ == State::kDisconnected) return;
+    if (state_ == State::kDisconnected || write_fault_) return;
 
     std::size_t remaining = data.size();
     if (remaining == 0) return;
@@ -150,17 +128,19 @@ void TcpConnection::sendInLoop(std::string_view data) {
     }
 
     if (fault) {
+        // 不在调用方栈上同步关闭：调用方可能正处在上游数据的解析回调里（ProxySession 转发 SSE），
+        // 同步 handleClose 会经 close 回调重入会话的取消路径。之后的 send 直接丢弃。
+        write_fault_ = true;
         handleError();
-        handleClose();
+        TcpConnectionPtr conn(shared_from_this());
+        loop_->queueInLoop([conn] { conn->handleClose(); });
     }
 }
 
 void TcpConnection::handleRead(Timestamp receive_time) {
     loop_->assertInLoopThread();
-    if (state_ == State::kHandshaking) {
-        handleHandshake();
-        if (state_ != State::kConnected) return;
-    }
+    // 已关闭但对象还活着（handleClose 把析构推迟到本轮之后）时，本轮剩下的事件直接忽略
+    if (state_ == State::kDisconnected) return;
     IoResult r = transport_->readInto(input_buffer_);
     if (r.bytes > 0) {
         if (message_callback_) message_callback_(shared_from_this(), &input_buffer_, receive_time);
@@ -173,31 +153,12 @@ void TcpConnection::handleRead(Timestamp receive_time) {
         last_error_ = transport_->lastError();
         handleError();
         handleClose();
-        return;
-    }
-    // TLS：SSL 内部可能还有数据而 socket 已空，主动再读一次
-    if (state_ != State::kDisconnected && transport_->readWantsWrite() && !channel_.isWriting()) {
-        channel_.enableWriting();
-    }
-    if (state_ != State::kDisconnected && transport_->hasBufferedInput()) {
-        TcpConnectionPtr conn(shared_from_this());
-        loop_->queueInLoop([conn] {
-            if (conn->state_ != State::kDisconnected) conn->handleRead(nowSteady());
-        });
     }
 }
 
 void TcpConnection::handleWrite() {
     loop_->assertInLoopThread();
     if (!channel_.isWriting()) return;
-    if (transport_->readWantsWrite()) {
-        handleRead(nowSteady());
-        if (state_ == State::kDisconnected) return;
-        if (output_buffer_.readableBytes() == 0) {
-            channel_.disableWriting();
-            return;
-        }
-    }
     if (output_buffer_.readableBytes() == 0) {
         channel_.disableWriting();
         return;
@@ -235,6 +196,9 @@ void TcpConnection::handleClose() {
     if (connection_callback_) connection_callback_(guard);
     if (close_callback_) close_callback_(guard);
     channel_.remove();
+    // EventLoop 正在遍历本轮 epoll 返回的裸 Channel* 列表。上游连接的最后一个引用可能随会话在上面的回调里释放，
+    // 若本连接的 Channel 还排在本轮后面就会被访问已释放内存。把析构推迟到本轮事件处理完之后。
+    loop_->queueInLoop([guard] {});
 }
 
 void TcpConnection::handleError() {
@@ -306,25 +270,20 @@ void TcpConnection::abortAndDrain(const std::function<void(std::string_view)>& o
 }
 
 void TcpConnection::startRead() {
-    loop_->runInLoop([this] {
-        if (state_ == State::kDisconnected) return;
-        if (!reading_) {
-            reading_ = true;
-            channel_.enableReading();
-        }
-        if (transport_->hasBufferedInput()) {
-            handleRead(nowSteady());
-        }
+    TcpConnectionPtr conn(shared_from_this());
+    loop_->runInLoop([conn] {
+        if (conn->state_ == State::kDisconnected || conn->reading_) return;
+        conn->reading_ = true;
+        conn->channel_.enableReading();
     });
 }
 
 void TcpConnection::stopRead() {
-    loop_->runInLoop([this] {
-        if (state_ == State::kDisconnected) return;
-        if (reading_) {
-            reading_ = false;
-            channel_.disableReading();
-        }
+    TcpConnectionPtr conn(shared_from_this());
+    loop_->runInLoop([conn] {
+        if (conn->state_ == State::kDisconnected || !conn->reading_) return;
+        conn->reading_ = false;
+        conn->channel_.disableReading();
     });
 }
 

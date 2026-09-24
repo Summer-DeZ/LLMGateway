@@ -22,7 +22,7 @@ class EventLoop;
 
 class TcpConnection : noncopyable, public std::enable_shared_from_this<TcpConnection> {
 public:
-    enum class State { kHandshaking, kConnected, kDisconnecting, kDisconnected };
+    enum class State { kConnecting, kConnected, kDisconnecting, kDisconnected };
 
     TcpConnection(EventLoop* loop, std::string name, int sockfd, InetAddress local_addr, InetAddress peer_addr,
                   std::unique_ptr<Transport> transport);
@@ -66,7 +66,6 @@ public:
     const InetAddress& localAddress() const { return local_addr_; }
     const InetAddress& peerAddress() const { return peer_addr_; }
     const std::string& lastError() const { return last_error_; }
-    bool tlsResumed() const { return transport_->tlsResumed(); }
 
     std::any& context() { return context_; }
 
@@ -78,7 +77,6 @@ private:
     void handleWrite();
     void handleClose();
     void handleError();
-    void handleHandshake();
     void sendInLoop(std::string_view data);
     void sendBufferInLoop(Buffer* buf);
     void shutdownInLoop();
@@ -97,6 +95,7 @@ private:
     InetAddress local_addr_;
     InetAddress peer_addr_;
     std::string last_error_;
+    bool write_fault_ = false;
     std::any context_;
 
     ConnectionCallback connection_callback_;

@@ -41,7 +41,7 @@ UpstreamExchange::~UpstreamExchange() = default;
 void UpstreamExchange::buildRequest() {
     std::string out;
     std::string host_header = url_.host;
-    if (url_.port != (url_.tls ? 443 : 80)) host_header += ":" + std::to_string(url_.port);
+    if (url_.port != 80) host_header += ":" + std::to_string(url_.port);
 
     out.append(request_.method);
     out.push_back(' ');

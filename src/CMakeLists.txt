@@ -17,7 +17,7 @@ gw_module(base)
 target_link_libraries(gw_base PUBLIC spdlog::spdlog)
 
 gw_module(net)
-target_link_libraries(gw_net PUBLIC gw_base Threads::Threads OpenSSL::SSL)
+target_link_libraries(gw_net PUBLIC gw_base Threads::Threads)
 
 gw_module(http)
 target_link_libraries(gw_http PUBLIC gw_net)

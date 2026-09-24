@@ -65,8 +65,6 @@ void TcpServer::newConnection(int sockfd, const InetAddress& peer_addr) {
     conn->setWriteCompleteCallback(write_complete_callback_);
     conn->setCloseCallback([this](const TcpConnectionPtr& c) { removeConnection(c); });
     conn->setTcpNoDelay(true);
-    // 限制内核发送缓冲，让用户态高水位（背压）能及时生效，同时约束每连接内核内存
-    conn->setSendBufferSize(64 * 1024);
     if (high_water_mark_callback_) {
         conn->setHighWaterMarkCallback(high_water_mark_callback_, high_water_mark_);
     }

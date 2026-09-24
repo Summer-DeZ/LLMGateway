@@ -20,7 +20,6 @@
 #include "net/event_loop.hpp"
 #include "net/inet_address.hpp"
 #include "net/resolver.hpp"
-#include "net/tls.hpp"
 
 using namespace std::chrono_literals;
 
@@ -59,17 +58,7 @@ int main(int argc, char** argv) {
     gw::gateway::GatewayContext ctx{config};
 
     gw::net::Resolver resolver(std::chrono::seconds(config->dns.cache_ttl_seconds));
-    std::unique_ptr<gw::net::TlsContext> tls_context;
-    {
-        auto created = gw::net::TlsContext::create(config->tls.verify_peer, config->tls.ca_file);
-        if (!created) {
-            std::fprintf(stderr, "tls init failed: %s\n", created.error().c_str());
-            return 1;
-        }
-        tls_context = std::move(*created);
-    }
     ctx.resolver = &resolver;
-    ctx.tls_context = tls_context.get();
 
     gw::http::HttpServerOptions options;
     options.max_body_bytes = config->server.max_body_bytes;
@@ -77,21 +66,22 @@ int main(int argc, char** argv) {
     options.header_timeout = config->server.header_timeout;
     options.body_timeout = config->server.body_timeout;
     options.keepalive_idle = config->server.keepalive_idle;
+    options.downstream_sndbuf_bytes = config->stream.downstream_sndbuf_bytes;
 
     gw::http::HttpServer server(&loop, gw::net::InetAddress(listen->first, listen->second), "gateway", options);
     server.setThreadNum(config->server.io_threads);
-    server.setThreadInitCallback([&config, tls = tls_context.get(), &resolver](gw::net::EventLoop* io_loop) {
+    server.setThreadInitCallback([&config, &resolver](gw::net::EventLoop* io_loop) {
         gw::http::PoolOptions pool_options;
         pool_options.idle_timeout = std::chrono::seconds(4);
         pool_options.idle_timeout_for = [config](const gw::http::UpstreamKey& key) {
             for (const auto& [name, upstream] : config->upstreams) {
-                if (upstream.url.host == key.host && upstream.url.port == key.port && upstream.url.tls == key.tls) {
+                if (upstream.url.host == key.host && upstream.url.port == key.port) {
                     return std::chrono::seconds(upstream.pool_idle_seconds);
                 }
             }
             return std::chrono::seconds(4);
         };
-        io_loop->context() = std::make_shared<gw::http::UpstreamPool>(io_loop, &resolver, tls, pool_options);
+        io_loop->context() = std::make_shared<gw::http::UpstreamPool>(io_loop, &resolver, pool_options);
     });
 
     gw::gateway::Router router(ctx, server);
@@ -116,27 +106,26 @@ int main(int argc, char** argv) {
         server.stopAccepting();
         server.drain();
 
-        auto checker = std::make_shared<std::function<void()>>();
-        std::weak_ptr<std::function<void()>> weak_checker = checker;
-        *checker = [&loop, &ctx, weak_checker] {
-            if (ctx.active_sessions.load() == 0) {
-                loop.quit();
-                return;
+        // 活跃会话归零后退出；loop 退出后定时器随之失效，不需要取消
+        loop.runEvery(50ms, [&loop, &ctx] {
+            if (ctx.active_sessions.load() == 0) loop.quit();
+        });
+        loop.runAfter(std::chrono::seconds(config->shutdown.drain_seconds), [&loop, &ctx, &router] {
+            int active = ctx.active_sessions.load();
+            if (active > 0) {
+                SPDLOG_WARN("drain timeout, cancelling {} active sessions", active);
+                router.cancelAll("gateway shutdown");
             }
-            if (auto fn = weak_checker.lock()) loop.runAfter(50ms, *fn);
-        };
-        loop.runAfter(50ms, *checker);
-        loop.runAfter(std::chrono::seconds(config->shutdown.drain_seconds), [&loop, &ctx] {
-            if (ctx.active_sessions.load() > 0) {
-                SPDLOG_WARN("drain timeout, forcing shutdown with {} active sessions", ctx.active_sessions.load());
-            }
-            loop.quit();
+            // 取消在各 io loop 上异步完成，归零后由上面的轮询退出；这里兜底
+            loop.runAfter(5s, [&loop] { loop.quit(); });
         });
     });
     sig_channel.enableReading();
 
     loop.loop();
 
+    // 先停 io 线程（剩余连接的 connectDestroyed 会回调 Router），再让 Router 等对象析构
+    server.stop();
     sig_channel.disableAll();
     sig_channel.remove();
     ::close(sig_fd);

@@ -23,6 +23,8 @@ struct HttpServerOptions {
     std::chrono::milliseconds header_timeout{30000};
     std::chrono::milliseconds body_timeout{60000};
     std::chrono::milliseconds keepalive_idle{75000};
+    // 下游连接的 SO_SNDBUF；0 表示不设置。不限制时内核发送缓冲会自动增长到数 MB，用户态高水位很难触发
+    int downstream_sndbuf_bytes = 64 * 1024;
 };
 
 // 挂在下游 TcpConnection::context() 上
@@ -32,7 +34,6 @@ struct HttpConnState {
     RequestParser parser;
     net::Buffer pending;          // 未解析完/被推迟解析的输入
     std::shared_ptr<void> session;  // 进行中的 ProxySession（gateway 侧填充）
-    std::function<void()> request_done;
     net::TimerId header_timer;
     net::TimerId body_timer;
     net::TimerId keepalive_timer;
@@ -63,6 +64,11 @@ public:
     void stopAccepting();
     // 优雅退出：新请求 503 + close；空闲连接直接关闭
     void drain();
+    // 在 base loop 线程上调用：销毁剩余连接并停止 io 线程。之后各 handler 不再被调用，
+    // 所以必须在 handler 引用的对象（Router 等）析构之前调用
+    void stop();
+    // fn 在每个连接所属的 io loop 上执行；只能在 base loop 线程上调用
+    void forEachConnection(const std::function<void(const net::TcpConnectionPtr&)>& fn);
 
     static HttpConnState* stateOf(const net::TcpConnectionPtr& conn);
     // ProxySession 结束后的回调：解除 busy，继续解析缓冲里的下一个请求

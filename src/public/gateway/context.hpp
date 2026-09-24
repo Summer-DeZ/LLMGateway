@@ -7,7 +7,6 @@
 
 namespace gw::net {
 class Resolver;
-class TlsContext;
 }  // namespace gw::net
 
 namespace gw::gateway {
@@ -18,7 +17,6 @@ struct GatewayContext {
     std::atomic<int> active_sessions{0};
     std::atomic<bool> draining{false};
     net::Resolver* resolver = nullptr;
-    net::TlsContext* tls_context = nullptr;
 };
 
 }  // namespace gw::gateway

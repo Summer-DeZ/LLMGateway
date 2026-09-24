@@ -18,21 +18,16 @@
 #include "net/resolver.hpp"
 #include "net/tcp_connection.hpp"
 
-namespace gw::net {
-class TlsContext;
-}
-
 namespace gw::http {
 
 struct UpstreamKey {
-    bool tls = false;
     std::string host;
     std::uint16_t port = 80;
     auto operator<=>(const UpstreamKey&) const = default;
 };
 
 struct AcquireError {
-    enum class Kind { resolve, connect_refused, connect_timeout, tls_verify, tls_handshake, cancelled };
+    enum class Kind { resolve, connect_refused, connect_timeout, cancelled };
     Kind kind = Kind::connect_refused;
     std::string message;
 };
@@ -42,8 +37,6 @@ struct PoolOptions {
     std::chrono::seconds idle_timeout{4};
     // 每个上游可覆盖空闲超时（配置的 pool_idle_seconds）
     std::function<std::chrono::seconds(const UpstreamKey&)> idle_timeout_for;
-    bool tls_verify_peer = true;
-    std::string ca_file;
 };
 
 struct Lease {
@@ -51,8 +44,6 @@ struct Lease {
     UpstreamKey key;
     bool reused = false;
     Duration connect_time{};
-    Duration tls_time{};
-    bool tls_resumed = false;
 };
 
 class UpstreamPool;
@@ -73,12 +64,14 @@ private:
 // 每 loop 一个；连接不跨 loop 复用
 class UpstreamPool : noncopyable {
 public:
-    UpstreamPool(net::EventLoop* loop, net::Resolver* resolver, net::TlsContext* tls_context, PoolOptions options);
+    UpstreamPool(net::EventLoop* loop, net::Resolver* resolver, PoolOptions options);
     ~UpstreamPool();
 
-    // 回调在本 loop 上执行；返回的连接已完成握手、处于 kConnected
+    // 回调在本 loop 上执行，未取消的 acquire 恰好回调一次；AcquireHandle::cancel() 之后不再保证回调。
+    // 返回的连接处于 kConnected。allow_idle=false 时跳过空闲连接、一定新建（复用连接首字节前失败后的重发用）
     std::shared_ptr<AcquireHandle> acquire(const UpstreamKey& key, std::chrono::milliseconds connect_timeout,
-                                           std::function<void(std::expected<Lease, AcquireError>)> cb);
+                                           std::function<void(std::expected<Lease, AcquireError>)> cb,
+                                           bool allow_idle = true);
     void release(Lease lease);
     std::size_t idleCount() const;
     void closeAll();
@@ -98,7 +91,6 @@ private:
 
     net::EventLoop* loop_;
     net::Resolver* resolver_;
-    net::TlsContext* tls_context_;
     PoolOptions options_;
     std::map<UpstreamKey, std::vector<IdleEntry>> idle_;
     std::map<net::TcpConnection*, UpstreamKey> idle_keys_;

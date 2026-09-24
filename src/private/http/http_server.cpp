@@ -26,7 +26,20 @@ HttpServer::HttpServer(net::EventLoop* loop, const net::InetAddress& listen_addr
     });
 }
 
-HttpServer::~HttpServer() = default;
+HttpServer::~HttpServer() {
+    stop();
+}
+
+void HttpServer::stop() {
+    loop_->assertInLoopThread();
+    // TcpServer 析构时在各 io loop 上执行 connectDestroyed（会回调 onConnection），然后 join io 线程；
+    // 先于本对象其余成员销毁，保证那时各 handler 仍然有效
+    tcp_server_.reset();
+}
+
+void HttpServer::forEachConnection(const std::function<void(const net::TcpConnectionPtr&)>& fn) {
+    if (tcp_server_) tcp_server_->forEachConnection(fn);
+}
 
 HttpConnState* HttpServer::stateOf(const net::TcpConnectionPtr& conn) {
     auto* state = std::any_cast<HttpConnState>(&conn->context());
@@ -38,11 +51,11 @@ void HttpServer::start() {
 }
 
 void HttpServer::stopAccepting() {
-    tcp_server_->stopAccepting();
+    if (tcp_server_) tcp_server_->stopAccepting();
 }
 
 void HttpServer::drain() {
-    tcp_server_->forEachConnection([](const net::TcpConnectionPtr& conn) {
+    forEachConnection([](const net::TcpConnectionPtr& conn) {
         auto* state = stateOf(conn);
         if (!state) return;
         state->draining = true;
@@ -108,13 +121,9 @@ void HttpServer::startKeepaliveTimer(const net::TcpConnectionPtr& conn, HttpConn
 
 void HttpServer::onConnection(const net::TcpConnectionPtr& conn) {
     if (conn->connected()) {
+        if (options_.downstream_sndbuf_bytes > 0) conn->setSendBufferSize(options_.downstream_sndbuf_bytes);
         conn->context() = HttpConnState(ParserLimits{options_.max_body_bytes, options_.max_body_bytes});
-        auto* state = stateOf(conn);
-        state->request_done = [this, weak = std::weak_ptr<net::TcpConnection>(conn)] {
-            auto c = weak.lock();
-            if (c) finishRequest(c);
-        };
-        startHeaderTimer(conn, state);
+        startHeaderTimer(conn, stateOf(conn));
     } else {
         auto* state = stateOf(conn);
         if (state) cancelTimers(conn, state);
