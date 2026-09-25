@@ -145,6 +145,8 @@ std::expected<std::shared_ptr<Config>, std::string> Config::load(const std::stri
                 user.name = u.value("name", key);
                 user.rpm = u.value("rpm", 0.0);
                 user.tpm = u.value("tpm", 0.0);
+                if (u.contains("rpm_burst")) user.rpm_burst = u.at("rpm_burst").get<double>();
+                if (u.contains("tpm_burst")) user.tpm_burst = u.at("tpm_burst").get<double>();
                 if (u.contains("quota")) {
                     QuotaConfig q;
                     q.daily_tokens = u.at("quota").value("daily_tokens", std::int64_t{0});
@@ -217,6 +219,8 @@ std::expected<std::shared_ptr<Config>, std::string> Config::load(const std::stri
                 }
                 model.rpm = m.value("rpm", 0.0);
                 model.tpm = m.value("tpm", 0.0);
+                if (m.contains("rpm_burst")) model.rpm_burst = m.at("rpm_burst").get<double>();
+                if (m.contains("tpm_burst")) model.tpm_burst = m.at("tpm_burst").get<double>();
                 model.default_max_tokens = m.value("default_max_tokens", 4096);
                 if (m.contains("retry")) {
                     const json& r = m.at("retry");

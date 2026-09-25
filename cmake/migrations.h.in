@@ -1,0 +1,10 @@
+// 构建时生成：sql/migrations/*.sql 的嵌入副本（单一来源是 sql/migrations/ 下的文件）
+#pragma once
+
+namespace gw::gateway {
+
+inline constexpr char kMigration001[] = R"sql(
+@GW_MIGRATION_001@
+)sql";
+
+}  // namespace gw::gateway

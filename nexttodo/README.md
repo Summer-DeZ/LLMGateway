@@ -1,11 +1,11 @@
 # LLMGateway 实施规格：入口
 
-状态：**全部任务未开始**。编写日期：2026-09-24。源码基线：空骨架（`README.md`、`src/CMakeLists.txt` 为空）。
+状态：**已推进至 G13**，具体状态与待验收项见 [任务状态表](implementation-tasks.md#1-任务图与状态)。规格编写日期：2026-09-24；服务入口更新：2026-09-25。
 
 本目录是交给实现者的执行规格：基于 muduo 思路自研 Reactor，实现一个 OpenAI / Anthropic 兼容的 LLM 网关，
 并让 `~/DAgent` 只改配置即可通过网关访问模型。
 
-**范围：只做本地。** 所有上游都是本机的明文 HTTP 服务（Qwen3.6、Qwen3.8、fault_upstream），
+**范围：只做本地。** 所有上游都是本机的明文 HTTP 服务（Qwen3.6、Nemotron、Gemma4、fault_upstream），
 不接入任何远端/云端模型，不实现 TLS（原 G08 已移出范围，编号不复用）。配置里出现 `https://` 的 `base_url` 在加载时报错。
 
 ## 1. 要展示的能力
@@ -69,8 +69,9 @@
 
 | 名称 | 启动/停止 | 地址 | 说明 |
 | --- | --- | --- | --- |
-| Qwen3.6（主） | `~/LLM/run-qwen36.sh` / `~/LLM/stop-qwen36.sh` | `127.0.0.1:10010` | 别名 `Qwen3.6-35B-A3B`；4 槽 × 131072；同时提供 `/v1/chat/completions` 与 `/v1/messages`；服务端默认 temp 0.6，思考模式开启（流里有 `reasoning_content`） |
-| Qwen3.8（备） | `~/LLM/run-qwen.sh` / `~/LLM/stop-qwen.sh`（会停掉**所有** llama-server） | `127.0.0.1:10009` | fallback 目标 |
+| Qwen3.6（主） | `~/LLM/llm.sh start qwen36` / `~/LLM/llm.sh stop qwen36` | `127.0.0.1:10010` | 别名 `Qwen3.6-35B-A3B`；4 槽 × 131072；同时提供 `/v1/chat/completions` 与 `/v1/messages`；服务端默认 temp 0.6，思考模式开启（流里有 `reasoning_content`） |
+| Nemotron（备一） | `~/LLM/llm.sh start nemotron` / `~/LLM/llm.sh stop nemotron` | `127.0.0.1:10011` | 别名 `Nemotron-3.5-Lightning-30B-A3B`；4 槽 × 131072 |
+| Gemma4（备二） | `~/LLM/llm.sh start gemma4` / `~/LLM/llm.sh stop gemma4` | `127.0.0.1:10012` | 别名 `gemma-4-26B-A4B-it`；4 槽 × 131072 |
 | fault_upstream | 本项目构建产物 | `127.0.0.1:19000` | 故障注入 |
 
 已核实的 llama.cpp（5b59b83）行为，可直接用作验收场景：
@@ -80,7 +81,8 @@
 - `GET /slots` 默认开启，可查看槽位是否在处理任务——确认取消后槽位立即释放；
 - 4 个槽位满时新请求排队——可观察排队对 TTFT 的影响。
 
-注意 `run-qwen36.sh` 的硬限制：不超过 4 槽 × 131072 上下文，DAgent 里指向它的 `context_window` 不得大于 131072。
+当前入口以 `~/LLM/configs/*.env` 为准；旧 Qwen3.8 / 10009 不再作为备用目标。
+注意 `llm.sh` 对所有模型的硬限制：不超过 4 槽 × 131072 上下文，DAgent 里指向它的 `context_window` 不得大于 131072。
 
 ## 5. 恢复一次中断的实施
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <compare>
 #include <cstddef>
@@ -8,6 +9,8 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -72,8 +75,11 @@ public:
     std::shared_ptr<AcquireHandle> acquire(const UpstreamKey& key, std::chrono::milliseconds connect_timeout,
                                            std::function<void(std::expected<Lease, AcquireError>)> cb,
                                            bool allow_idle = true);
-    void release(Lease lease);
+     void release(Lease lease);
+    // 原子计数，可跨线程读取（主循环刷指标用）；池只在本 loop 上修改
     std::size_t idleCount() const;
+    // 该池是否服务过这个 host:port（主循环刷指标用；任意线程可调）
+    bool servesKey(const UpstreamKey& key) const;
     void closeAll();
 
 private:
@@ -95,6 +101,9 @@ private:
     std::map<UpstreamKey, std::vector<IdleEntry>> idle_;
     std::map<net::TcpConnection*, UpstreamKey> idle_keys_;
     std::vector<std::shared_ptr<net::Connector>> pending_connectors_;
+    std::atomic<std::size_t> idle_total_{0};  // 与 idle_ 同步维护，供跨线程读取
+    mutable std::mutex known_keys_mu_;
+    std::set<UpstreamKey> known_keys_;        // 服务过的 host:port（putIdle/acquire 时登记）
 };
 
 }  // namespace gw::http

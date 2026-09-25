@@ -49,6 +49,8 @@ void init(const std::string& level, const std::string& file, const std::string& 
             "gw.access", sink, spdlog::thread_pool(), spdlog::async_overflow_policy::overrun_oldest);
         g_access->set_level(spdlog::level::info);
         g_access->set_pattern("%v");
+        // 访问日志一行一请求，逐条刷盘：审计与验收要求请求结束后立刻可见
+        g_access->flush_on(spdlog::level::info);
     }
 }
 

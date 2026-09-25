@@ -25,6 +25,8 @@ struct UserConfig {
     std::string name;
     double rpm = 0;
     double tpm = 0;
+    std::optional<double> rpm_burst;  // 缺省 = rpm
+    std::optional<double> tpm_burst;  // 缺省 = tpm
     std::optional<QuotaConfig> quota;
 };
 
@@ -68,6 +70,8 @@ struct ModelConfig {
     std::vector<std::string> targets;
     double rpm = 0;
     double tpm = 0;
+    std::optional<double> rpm_burst;
+    std::optional<double> tpm_burst;
     int default_max_tokens = 4096;
     RetryConfig retry;
 };

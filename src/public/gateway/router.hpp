@@ -12,9 +12,11 @@
 
 namespace gw::gateway {
 
+class UsageApi;
+
 class Router : noncopyable {
 public:
-    Router(GatewayContext& context, http::HttpServer& server);
+    Router(GatewayContext& context, http::HttpServer& server, UsageApi* usage_api = nullptr);
     ~Router();
 
     void handle(const http::HttpRequest& request, const net::TcpConnectionPtr& conn);
@@ -32,6 +34,7 @@ private:
 
     GatewayContext& context_;
     http::HttpServer& server_;
+    UsageApi* usage_api_ = nullptr;
 };
 
 }  // namespace gw::gateway

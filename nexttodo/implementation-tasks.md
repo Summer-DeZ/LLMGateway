@@ -21,11 +21,11 @@ flowchart LR
 | G05 | 上游客户端：Resolver / Connector / 响应解析 / chunked / 连接池 | 真实验收通过 | G04 |
 | G06 | OpenAI 透传代理（非流式 + 流式）、鉴权、路由、SSE | 真实验收通过 | G05 |
 | G07 | 背压、取消传播、超时（含 2026-09-25 审查返工） | 真实验收通过 | G06 |
-| G09 | 可观测性：记录、访问日志、指标、成本、admin 接口 | 未开始 | G07 |
-| G10 | 限流 | 未开始 | G09 |
-| G11 | 用量账本（PostgreSQL）与配额（Redis）、流式超额截断 | 未开始 | G10 + 容器已启动 |
-| G12 | 故障注入上游、重试、降级、熔断 | 未开始 | G11 |
-| G13 | 响应缓存 | 未开始 | G12 |
+| G09 | 可观测性：记录、访问日志、指标、成本、admin 接口 | 真实验收通过 | G07 |
+| G10 | 限流 | 真实验收通过 | G09 |
+| G11 | 用量账本（PostgreSQL）与配额（Redis）、流式超额截断 | 真实验收通过 | G10 + 容器已启动 |
+| G12 | 故障注入上游、重试、降级、熔断 | 真实验收通过（原 fault/503 验收 + 新 Nemotron/Gemma4 真实降级验收） | G11 |
+| G13 | 响应缓存 | 真实验收通过 | G12 |
 | G14 | Anthropic 入口与上游、协议转换 | 未开始 | G13 |
 | G15 | DAgent 对接、压测、设计文档 | 未开始 | G14 |
 
@@ -330,8 +330,8 @@ WHERE d.billable_tokens IS DISTINCT FROM s.billable OR d.requests IS DISTINCT FR
 - 请求级总量 = 各尝试之和；`gateway_wasted_tokens_total` 等于失败尝试的消耗之和。
 
 真实模型场景：
-- 模型 `qwen` 的主目标 qwen36 停掉（先确认没有其他使用者，`~/LLM/stop-qwen36.sh`）且 qwen38 运行 → 请求降级到 qwen38；
-- `~/LLM/run-qwen36.sh` 启动后立即请求 → 加载期间收到 503 Loading model 被重试（日志中能看到 503 与退避），加载完成后成功或降级。
+- 模型 `qwen` 的主目标 qwen36 不可达且 nemotron 运行 → 请求降级到 nemotron；前两个目标不可达时降级到 gemma4。验收可在临时网关配置中将目标地址指向未监听的本机端口，不停止在用模型；若必须停服务，先确认没有其他使用者，再用 `~/LLM/llm.sh stop qwen36`。
+- `~/LLM/llm.sh start qwen36` 启动后立即请求 → 加载期间收到 503 Loading model 被重试（日志中能看到 503 与退避），加载完成后成功或降级。
 
 ### G13：响应缓存
 
@@ -389,7 +389,7 @@ curl -sN http://127.0.0.1:10010/v1/messages -H "$JSON" -H 'anthropic-version: 20
 | 1 | `gw-qwen` 多轮对话 + 读写文件工具调用 | 访问日志含 TTFT/token/成本；DAgent 显示 usage |
 | 2 | 生成中按 Esc | 网关 `cancelled`，`/slots` 立即空闲 |
 | 3 | `gk-dagent` tpm 调低到 20000 | DAgent 显示重试后成功；网关出现 429 记录 |
-| 4 | 对话中停掉 qwen36（确认无他人使用） | 下一轮 DAgent 无感继续，upstream=qwen38；熔断打开后不再尝试 10010 |
+| 4 | 临时配置令 qwen36 不可达（实际停服务须确认无他人使用） | 下一轮 DAgent 无感继续，upstream=nemotron；前两目标不可达时 upstream=gemma4；熔断打开后跳过失败目标 |
 | 5 | `gw-claude` 对话 + 工具调用 | Anthropic 入口 → OpenAI 上游转换全路径可用 |
 | 6 | 一段 DAgent 会话结束后查 `curl -H 'Authorization: Bearer gk-dagent' $GW/v1/usage` | 本次会话的输入/输出/缓存命中 token 与 PG 明细一致 |
 | 7 | 把 `gk-dagent` 的 `daily_tokens` 设在会话中途能用完的位置 | 当前回复在额度处以 finish=length 结束（记录 DAgent 实际如何呈现）；下一轮 DAgent 收到 429 `insufficient_quota`，因为 Retry-After 超过 300 秒而直接报错 |
@@ -457,6 +457,117 @@ POST /v1/chat/completions                        → 无故障，正常输出
 所有解析器类单测都必须包含"逐字节喂入与整段喂入结果一致"的用例。
 
 ## 6. 执行记录
+
+
+### G09–G13 验收提交前修复（2026-09-25）
+
+- 状态：真实验收通过。提交前双轴审查发现并修复：final 上游取消伪造零计量、缓存末条突破分片预算、半开探测超过冷却期被重复放行、PG 健康状态跨线程竞争、异步提交未排空即退出，以及账本对象销毁缺少线程屏障。
+- 实现：final 的未知计量保留 null；允许淘汰超预算的最后条目；探测必须显式结束或释放；PG connected 原子发布；受锁保护的 in-flight 行数计入 backlog；main 等待 ledger loop 清理完成后 join。
+- 验证：dev 构建成功，134/134 单测通过；真实 qwen-final 取消为 unreported/null；小缓存重复请求仍 MISS；持有 PostgreSQL 表锁延迟写入时发送 SIGTERM，退出等待约 3.475 秒，退出后待提交账单存在。
+- 证据：`temp/G13/upstream-refresh/review-tests.log`、`live-20260925-212229/review-summary.json` 及对应访问日志。两轴复核原阻塞项均通过。
+
+### G13 补充：本机模型服务入口调整（2026-09-25）
+
+- 状态：**真实验收通过**。原 G13 缓存验收结论保留；本次新入口的 20 项真实检查全部通过。
+- 依据：现场读取 `~/LLM/README.md`、`~/LLM/configs/{qwen36,nemotron,gemma4}.env` 和 `llm.sh status`；不沿用旧服务快照。
+- 配置：移除 qwen38 / 10009，新增 nemotron / 10011（`Nemotron-3.5-Lightning-30B-A3B`）与 gemma4 / 10012（`gemma-4-26B-A4B-it`）；qwen36 / 10010（`Qwen3.6-35B-A3B`）保留。
+- 路由：兼容别名 `qwen` 按 qwen36 → nemotron → gemma4 降级；新增三个同名独立路由。新模型使用 llamacpp 计量和服务端采样默认值，不复制旧 Qwen3.8 的模板覆盖。未知模型单价不编造，按现有未配置单价规则成本记 0。
+- 文档：同步当前入口表、统一 `llm.sh` 启停命令、配置示例与 G12/G15 后续降级场景；历史执行记录和验收材料原样保留。未修改 C++ 实现，未推进 G14。
+- 构建与单测：`cmake --preset dev && cmake --build --preset dev -j4` 成功；`ctest --preset dev --output-on-failure`，133/133 通过。
+- 实际网关检查：使用仅覆盖监听地址和日志路径的临时配置启动真实网关；`/healthz` 200，`/v1/models` 与配置中的 7 个路由完全一致；检查后该临时网关正常退出（exit 0）。
+- 真实验收：用户要求继续验收后启动三模型，现场 `/health` 和模型标识匹配；三模型非流式、SSE、流式工具调用与工具结果回传（17+25=42）、取消传播均通过。取消后约 0.103s 观测到槽位释放，部分用量正常记录。
+- 缓存：三模型非流式/SSE 各自 MISS → HIT，响应体一致，HIT attempts=0、约 1ms；无 temperature 和 bypass 请求不命中；指标 6 MISS / 6 HIT。
+- 降级：通过临时配置的不可达本机端口制造建连失败，qwen36 不可达时 attempts=3 到 nemotron；前两目标不可达时 attempts=5 到 gemma4；未停用在用模型。补齐 G12 原真实备用模型降级验收。
+- 计量：22 条完整响应的 prompt/completion 与访问日志逐条一致；建连失败尝试计量为 0；3 条取消记录为 upstream_partial 且字段完整。本次未配置 PG/Redis，未重验 G11 数据库账本。
+- 环境处理：普通命令启动的模型进程在命令返回后消失，首次连接拒绝记录保留于 `live-20260925-211057/`；随后用用户级临时服务 `llmgateway-acceptance-models.service` 托管现有启动脚本，三模型保持运行，未修改模型配置。临时验收网关均正常退出。
+- 证据：`temp/G13/upstream-refresh/RESULT.md`、`accept.py`、`ctest-current.log`；最终真实记录位于 `live-20260925-211235/`，包含 results/summary、请求响应、访问日志、指标与取消计量记录。
+- 偏离锁定部分：用户要求更新服务入口，将旧 Qwen3.8 备用目标替换为 Nemotron/Gemma4；线程、所有权与代理状态机语义未变。
+
+### G13：响应缓存（2026-09-25）
+- 完成内容：`gateway/response_cache`（16 分片 LRU + 每片 mutex/字节预算）；SHA-256 键与请求体规范化；ProxySession 准入第 5 步（命中回放、MISS 标记、流式暂存与写回、命中记录/saved cost）；main 每 30 秒清扫 + gauge。
+- 构建：dev/asan/tsan 成功。
+- 单测：LruCacheTest 8 例（命中/未命中、LRU 顺序与字节预算、惰性过期、sweep、单条超限、键规范化、user 忽略、stream/protocol/usage 参与、stream_options 规范化）；全量 133。
+- 真实验收（temp/G13/gateway*.json、日志与 headers）：
+  1) 非流式 temperature=0 两次：MISS(957ms, `x-gateway-cache: MISS`) → HIT(0.95ms, attempts:0, body 完全相同)，记录 outcome=cache_hit、cost=0、saved=2.7e-05、usage_source=cache；
+  2) 流式两次：MISS(781ms) → HIT(0.74ms)，流内容逐字节相同、均含 [DONE]；
+  3) 不带 temperature 不缓存、`x-gateway-cache: bypass` 绕过、`force` 在 temperature≠0 时可缓存；
+  4) ttl_seconds=5：MISS→HIT→6 秒后 MISS；
+  5) max_bytes=64KB：250 个不同请求后 entries=176、bytes=61776（分片预算内），最近的命中、最早的已被淘汰；
+  6) /metrics：`gateway_cache_requests_total{result=hit/miss}` 与 `gateway_cache_saved_cost_usd_total{model=qwen}` 随命中增长。
+- 偏离规格之处及原因：无（未配置单价的上游 saved cost 记 0，符合 §3.3 口径）。
+- 遗留项与下一任务：G14（Anthropic 入口与协议转换）。
+
+### G12：故障注入上游、重试、降级、熔断（2026-09-25，进行中）
+- 完成内容：`test/fault_upstream/`（路径指令、times 状态、确定性分词、timings/progress、drop/hang/error、限速、连接日志）；`gateway/{retry_policy,circuit_breaker}`；ProxySession 尝试计划（skip 熔断目标）、失败分类表、Backoff 状态、降级、耗尽错误映射与 `x-gateway-upstream/attempts`；`/metrics` 熔断 gauge 与熔断状态日志。
+- 构建：dev/asan/tsan 成功。
+- 单测：RetryPolicyTest 5（失败分类表逐项、退避上下界、Retry-After 秒/HTTP-date）、CircuitBreakerTest 6（阈值打开、成功重置、半开单探测、冷却翻倍上限、取消释放探测、按上游隔离）；全量 133。
+- 真实验收（temp/G12/，11 项 fault 场景全部通过）：
+  1) status=503,times=1 → 200，attempts=2，upstream=fault-503；
+  2) status=429,retry_after=1,times=1 → 退避 1.01s 成功后 200，attempts=2；
+  3) status=429,retry_after=60 → 超 max_retry_after_ms 立即降级 qwen36，attempts=2；
+  4) status=500 → fault 2 次后降级，attempts=3，upstream=qwen36；
+  5) status=400 → 原样透传（fault 错误体），attempts=1；
+  6) drop_after=0（流式）→ 首事件前断开，透明重试+降级，attempts=3（2 fault + qwen36），客户端 200 且收到 [DONE]；
+  7) drop_after=10 → 客户端收到 10 个事件+流内错误、无 [DONE]，outcome=stream_interrupted，completion=10 与 fault 日志 "drop_after sent=10" 相等；
+  8) hang_after=5、idle_ms=3000 → 3.0s 后流内错误，completion=5 = fault "hang_after sent=5"；
+  9) ttfb_ms=5000、ttft_ms=2000 → 两次超时重试后降级 qwen36（4.7s）；
+  10) 熔断：连续请求 status=500，第 3 个请求期间打开（日志 `circuit breaker fault-breaker -> open`），之后 attempts=1 直接 qwen36；冷却 2s 后半开探测（日志 half_open → open），`gateway_upstream_circuit_state{fault-breaker}=1`；
+  11) 取消：rate=5,tokens=1000，timeout 3 → fault "conn close while streaming sent=15" 与 curl 被杀相差 1ms；记录 completion=15 == fault sent，cancel_latency_us=28。
+  计量核对：场景 1/2/4/5 被拒尝试全部为 0/`rejected`；7 的 completion=10；9 的超时尝试 0；请求总量=各尝试之和；`gateway_wasted_tokens_total` 与失败尝试消耗一致（drop10: completion=10/prompt=1/computed=1；rate: 30/4/4）；精确计量场景 fault-meter completion=10=上游确定性计数。
+- 返工记录（本轮修复）：`UpstreamExchange::handleClose` 中 `feedEof()` 已回调一次 `on_error`，随后又手动回调导致同一尝试被处理两次、破坏重试计划；修复为 feedEof 后若已 finished 直接返回；同时给 exchange 回调加 attempt epoch 守卫、失败尝试的 exchange 统一 forceClose 后再重试。
+- 真实模型场景：
+  - ✅ 加载中 503 重试：`~/LLM/stop-qwen36.sh` 后立即 `run-qwen36.sh` 并发请求（模型 `qwen-retry` targets=[qwen36-load]，长 precommit、高熔断阈值）：记录 attempts=[连接失败(0) → 503 Loading ×2 → 200]，退避 1157→2330→3224ms（debug 日志），7.2s 加载完成后成功。
+  - ⛔ 停机降级 qwen38：本环境 **不允许启动 Qwen3.8**（用户约束），无法执行；fault 场景 3/4/6/9 已覆盖同链条的降级逻辑（两个目标间切换）。
+- 偏离规格之处及原因：无。
+- 遗留项与下一任务：真实模型降级（qwen36 停、qwen38 起）待环境允许时人工执行；G13。
+
+### G11：用量账本与配额（2026-09-25）
+- 完成内容：`deploy/docker-compose.yml`、`deploy/.env.example`、`sql/migrations/001_init.sql`（CMake 配置阶段嵌入）；`store/{resp,redis_client,pg_client}`（RESP2 自研客户端、libpq 异步接入 Reactor）；`gateway/{ledger,quota,usage_api}`（迁移、批量入账、周期键、会话上报/截断、查询接口、对账）；ProxySession 准入 3a/3b、流式上报与截断、finish 入账与配额补报；main 装配 ledger loop、每 io loop RedisClient、迁移→预编译→启动重建；规格 §9 的 Redis/账本指标。
+- 构建：dev/asan/tsan 成功。
+- 单测：RespTest 11、QuotaPeriodTest 7、UsageRowTest 6；全量 133。
+- 真实验收（temp/G11/RESULT.md、gw*.log、drive.py、各场景输出；容器 llm-gateway-postgres-1:5433 / valkey-1:6380）：
+  1) 两实例同时启动迁移：schema_migrations 恰好 1 行，两实例均正常服务；
+  2) 20 个请求（流式/非流式/取消）：usage_records 20 行，token 与访问日志逐行相等，4 个取消行 usage_complete=true（llamacpp 已报告全部字段）；
+  3) 汇总一致性 SQL 返回 0 行；
+  4) 同一 x-request-id 两次：2 行、ledger_id 不同；
+  5) /v1/usage、/v1/usage/requests 翻页正常；Redis 日计数与 PG 汇总一致（1667）；
+  6) 准入超额：429 insufficient_quota，Retry-After=23251≈到本地零点；
+  7) 流式截断：finish_reason=length + usage 真实值 + [DONE]；账本 truncated=t、billable=501（限额剩余 500，超额 1 token）；下一个请求 429；
+  8) 58.7k prompt：首个 prompt_progress 即 429（无流内容）；input_tokens=58715、billable=0；槽位立即空闲；
+  9) 双实例并发 8 个流：4 截断 + 4 个 429；总超额 128（≈4×report_every_tokens）；结束后 reconcile diff=0；
+  10) 停 PG：新请求 503（fail closed）；期间队列中的行恢复后补记，恢复后 200；
+  11) 停 Redis：reject → 503；allow → 200 且入账；恢复后 200；
+  12) FLUSHALL 后重启：SET NX 从 PG 重建 day/month=3285，reconcile diff=0；
+  13) 压力下 SIGTERM：5 个流全部入账（access 5 行 = PG 5 行），队列写完、干净退出。
+- 返工/修复记录：迁移先查 schema_migrations 再应用；pipeline 模式禁用 PQsendQuery（改 PQsendQueryParams）；预编译必须在建表后；PgClient 析构漏摘 Channel 导致退出断言；RedisClient 需成员持有 Connector；配额重建必须在读连接就绪后；慢请求日志记录被 move 的字段。
+- 偏离规格之处及原因：月配额用尽的 Retry-After 按 30 天近似（规格未定义月边界秒数口径）；迁移 SQL 在 CMake 配置阶段从 `sql/migrations/` 嵌入。
+- 遗留项与下一任务：G12。
+
+### G10：限流（2026-09-25）
+- 完成内容：`gateway/{token_bucket,rate_limiter}`（4 桶、注入时钟、固定层级锁序、结算多退少补、waitFor）；准入第 4 步接线；响应 429 的 Retry-After/scope/dimension 与通过时的 x-ratelimit-* 头；配置支持 rpm_burst/tpm_burst；`proto/token_estimate` 增加 JSON 估算（唯一估算点）。
+- 构建：dev/asan/tsan 成功。
+- 单测：TokenBucketTest 8、RateLimiterTest 8（含 16 线程 × 1000 次并发精确扣减）；全量 133。
+- 真实验收（temp/G10/gateway.json、s1/*、s2_*、s3_*）：
+  1) gk-dagent rpm=5，10 个并发 → 5×200 + 5×429；429 带 Retry-After:12、scope=user、dimension=requests；200 带 x-ratelimit-*;
+  2) qwen tpm=3000、max_tokens=2500：第一个 200（约 3s 完成、实际用量 159）、紧接第二个 429（scope=model、dimension=tokens、Retry-After 40s）；结算后退还预留，5 秒内第三个 200（未结算需等待 40s+）；
+  3) 取消的请求按 consumed=157 结算，其余预留退还（取消后立即再发 200）。
+- 偏离规格之处及原因：无。
+- 遗留项与下一任务：G11。
+
+### G09：可观测性（2026-09-25）
+- 完成内容：`gateway/{request_record,metrics,pricing,access_log,admin}`；ProxySession 结束统一汇总（RequestRecord/访问日志/指标/最近 256 条/慢请求日志/账本预留位）；Router 增加 /metrics、/admin/stats、/admin/requests（admin.listen_local_only）与 401 留痕；main 装配与 pool idle gauge。
+- 构建：dev/asan/tsan 成功。
+- 单测：无新增（可观测性以真实验收为准），全量 133 通过。
+- 真实验收（temp/G09/access.log、metrics_final.txt、admin_stats.json、final_cancel_record.json、ttft_curl.txt 等）：
+  1) 一次流式请求后 access.log 末行 JSON 字段齐全；ttft_ms=89 与 curl starttransfer 90.5ms 相差 <2ms；
+  2) /metrics 指标齐全、随请求增长（含 cost/tokens/histogram/pool）；
+  3) 成本手算一致：4×0.1+11×0.1+1243×0.4=498.7µ→0.000499；取消 25×0.1+357×0.4=145.3µ→0.000145；
+  4) /admin/requests、/admin/stats 返回合理数据；取消请求 usage_source=upstream_partial、attempts[] 完整；
+  5) `final` 计量的取消（qwen-final）：completion_tokens=null、usage_complete=false、usage_source=unreported、gateway_usage_unreported_total 的 qwen36-final prompt/completion 各 +1；槽位立即空闲；
+  6) 记录与指标不含 token_estimate 数：预留量（G10 起）只用于准入，记录 token 全部来自上游。
+- 返工/修复记录：访问日志 logger 逐条 flush；admin 渲染 try/catch 防进程被可观测性缺陷拖垮；修复 /admin/stats 的 null json 崩溃；修复 cost 单位换算与慢请求日志取 moved 字段。
+- 偏离规格之处及原因：无。
+- 遗留项与下一任务：G10。
 
 ### G07 返工（2026-09-25）
 - 完成内容：返工清单第 1–15 项。

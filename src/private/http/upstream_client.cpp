@@ -109,6 +109,8 @@ void UpstreamExchange::handleClose(const net::TcpConnectionPtr& conn) {
     }
     if (!parser_.complete()) {
         parser_.feedEof();
+        // feedEof 内部已通过 on_error 回调报错（finished_ 已置位）：不能再回调一次
+        if (finished_) return;
         if (parser_.complete()) return;
         finished_ = true;
         reusable_ = false;

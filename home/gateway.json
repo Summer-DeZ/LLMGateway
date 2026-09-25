@@ -35,20 +35,38 @@
     },
     "qwen36-anth": { "kind": "anthropic", "base_url": "http://127.0.0.1:10010/v1", "model": "Qwen3.6-35B-A3B",
                      "default_max_tokens": 8192, "count_tokens": true },
-    "qwen38": { "kind": "openai-chat", "base_url": "http://127.0.0.1:10009/v1", "model": "Qwen3.8-Flash-Next", "metering": "llamacpp",
-                "extra_body": { "chat_template_kwargs": { "enable_thinking": true } } },
+    "nemotron": {
+      "kind": "openai-chat",
+      "base_url": "http://127.0.0.1:10011/v1",
+      "model": "Nemotron-3.5-Lightning-30B-A3B",
+      "metering": "llamacpp",
+      "timeouts": { "connect_ms": 3000, "ttft_ms": 90000, "idle_ms": 60000, "total_ms": 600000, "precommit_ms": 100000 },
+      "pool_idle_seconds": 4,
+      "breaker": { "failure_threshold": 5, "cooldown_ms": 30000 }
+    },
+    "gemma4": {
+      "kind": "openai-chat",
+      "base_url": "http://127.0.0.1:10012/v1",
+      "model": "gemma-4-26B-A4B-it",
+      "metering": "llamacpp",
+      "timeouts": { "connect_ms": 3000, "ttft_ms": 90000, "idle_ms": 60000, "total_ms": 600000, "precommit_ms": 100000 },
+      "pool_idle_seconds": 4,
+      "breaker": { "failure_threshold": 5, "cooldown_ms": 30000 }
+    },
     "qwen36-final": { "kind": "openai-chat", "base_url": "http://127.0.0.1:10010/v1", "model": "Qwen3.6-35B-A3B", "metering": "final" },
     "fault": { "kind": "openai-chat", "base_url": "http://127.0.0.1:19000/v1", "model": "fault", "metering": "llamacpp" }
   },
   "models": {
-    "qwen":       { "targets": ["qwen36", "qwen38"], "rpm": 120, "tpm": 1000000, "default_max_tokens": 4096,
+    "qwen":       { "targets": ["qwen36", "nemotron", "gemma4"], "rpm": 120, "tpm": 1000000, "default_max_tokens": 4096,
                     "retry": { "max_attempts": 2, "base_ms": 500, "max_ms": 8000, "max_retry_after_ms": 10000 } },
+    "qwen36":     { "targets": ["qwen36"], "rpm": 120, "tpm": 1000000, "default_max_tokens": 4096 },
+    "nemotron":   { "targets": ["nemotron"], "rpm": 120, "tpm": 1000000, "default_max_tokens": 4096 },
+    "gemma4":     { "targets": ["gemma4"], "rpm": 120, "tpm": 1000000, "default_max_tokens": 4096 },
     "qwen-anth":  { "targets": ["qwen36-anth"] },
     "qwen-final": { "targets": ["qwen36-final"] },
     "fault-demo": { "targets": ["fault", "qwen36"], "retry": { "max_attempts": 3, "base_ms": 200, "max_ms": 2000 } }
   },
   "pricing": {
-    "qwen36":   { "input": 0.10, "output": 0.40 },
-    "qwen38":   { "input": 0.05, "output": 0.20 }
+    "qwen36":   { "input": 0.10, "output": 0.40 }
   }
 }

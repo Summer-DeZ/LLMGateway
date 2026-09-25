@@ -16,6 +16,13 @@ endfunction()
 gw_module(base)
 target_link_libraries(gw_base PUBLIC spdlog::spdlog)
 
+# 把 sql/migrations/001_init.sql 嵌入到 gw_gateway（单一来源仍是 sql/migrations/）
+set(GW_MIGRATION_SQL ${CMAKE_SOURCE_DIR}/sql/migrations/001_init.sql)
+set(GW_MIGRATIONS_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/gw_migrations_embedded.h)
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/generated)
+file(READ ${GW_MIGRATION_SQL} GW_MIGRATION_001)
+configure_file(${CMAKE_SOURCE_DIR}/cmake/migrations.h.in ${GW_MIGRATIONS_HEADER} @ONLY)
+
 gw_module(net)
 target_link_libraries(gw_net PUBLIC gw_base Threads::Threads)
 
@@ -30,6 +37,7 @@ target_link_libraries(gw_proto PUBLIC gw_base nlohmann_json)
 
 gw_module(gateway)
 target_link_libraries(gw_gateway PUBLIC gw_http gw_store gw_proto OpenSSL::Crypto)
+target_include_directories(gw_gateway PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
 
 file(GLOB_RECURSE GW_APP_SRC CONFIGURE_DEPENDS ${GW_PRIVATE_DIR}/app/*.cpp)
 add_executable(llm-gateway ${GW_APP_SRC})

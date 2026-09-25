@@ -36,6 +36,7 @@ std::shared_ptr<net::TcpConnection> UpstreamPool::takeIdle(const UpstreamKey& ke
         IdleEntry entry = it->second.back();
         it->second.pop_back();
         idle_keys_.erase(entry.conn.get());
+        idle_total_.fetch_sub(1, std::memory_order_relaxed);
         auto idle_limit = options_.idle_timeout_for ? options_.idle_timeout_for(key) : options_.idle_timeout;
         if (nowSteady() - entry.last_used > idle_limit) {
             SPDLOG_DEBUG("upstream pool: closing expired idle connection {} -> {}", entry.conn->name(),
@@ -55,6 +56,7 @@ void UpstreamPool::putIdle(const UpstreamKey& key, const std::shared_ptr<net::Tc
         IdleEntry oldest = entries.front();
         entries.erase(entries.begin());
         idle_keys_.erase(oldest.conn.get());
+        idle_total_.fetch_sub(1, std::memory_order_relaxed);
         oldest.conn->forceClose();
     }
     conn->setMessageCallback([key](const net::TcpConnectionPtr& c, net::Buffer* buf, gw::Timestamp) {
@@ -67,6 +69,11 @@ void UpstreamPool::putIdle(const UpstreamKey& key, const std::shared_ptr<net::Tc
     conn->setWriteCompleteCallback(nullptr);
     entries.push_back(IdleEntry{conn, nowSteady()});
     idle_keys_[conn.get()] = key;
+    idle_total_.fetch_add(1, std::memory_order_relaxed);
+    {
+        std::scoped_lock lock(known_keys_mu_);
+        known_keys_.insert(key);
+    }
     SPDLOG_DEBUG("upstream pool: idle {} -> {} (idle_count={})", conn->name(),
                  key.host + ":" + std::to_string(key.port), entries.size());
 }
@@ -79,9 +86,11 @@ void UpstreamPool::removeIdle(const std::shared_ptr<net::TcpConnection>& conn) {
     auto it = idle_.find(key);
     if (it == idle_.end()) return;
     auto& entries = it->second;
+    std::size_t before = entries.size();
     entries.erase(std::remove_if(entries.begin(), entries.end(),
                                  [&](const IdleEntry& e) { return e.conn.get() == conn.get(); }),
                   entries.end());
+    if (entries.size() < before) idle_total_.fetch_sub(before - entries.size(), std::memory_order_relaxed);
 }
 
 void UpstreamPool::release(Lease lease) {
@@ -91,9 +100,12 @@ void UpstreamPool::release(Lease lease) {
 }
 
 std::size_t UpstreamPool::idleCount() const {
-    std::size_t total = 0;
-    for (const auto& [key, entries] : idle_) total += entries.size();
-    return total;
+    return idle_total_.load(std::memory_order_relaxed);
+}
+
+bool UpstreamPool::servesKey(const UpstreamKey& key) const {
+    std::scoped_lock lock(known_keys_mu_);
+    return known_keys_.count(key) > 0;
 }
 
 void UpstreamPool::closeAll() {
@@ -103,6 +115,7 @@ void UpstreamPool::closeAll() {
     }
     idle_.clear();
     idle_keys_.clear();
+    idle_total_.store(0, std::memory_order_relaxed);
     for (auto& conn : conns) {
         conn->forceClose();
     }
@@ -117,6 +130,10 @@ std::shared_ptr<AcquireHandle> UpstreamPool::acquire(const UpstreamKey& key,
                                              [](const std::shared_ptr<net::Connector>& c) { return c->finished(); }),
                               pending_connectors_.end());
     auto handle = std::make_shared<AcquireHandle>();
+    {
+        std::scoped_lock lock(known_keys_mu_);
+        known_keys_.insert(key);
+    }
 
     if (allow_idle) {
         if (auto conn = takeIdle(key)) {
