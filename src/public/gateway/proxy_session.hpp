@@ -25,6 +25,8 @@
 #include "net/tcp_connection.hpp"
 #include "proto/neutral.hpp"
 #include "proto/openai.hpp"
+#include "proto/anthropic.hpp"
+#include "proto/translator.hpp"
 
 namespace gw::gateway {
 
@@ -153,6 +155,9 @@ private:
     Ingress ingress_;
 
     proto::OpenAiRequestMeta meta_;
+    bool count_tokens_ = false;
+    proto::Protocol upstream_protocol_ = proto::Protocol::openai;
+    nlohmann::json upstream_request_;
     nlohmann::json request_json_;
     const ModelConfig* route_ = nullptr;
     const UpstreamConfig* target_ = nullptr;
@@ -179,6 +184,9 @@ private:
     std::shared_ptr<http::UpstreamExchange> exchange_;
     std::unique_ptr<UsageMeter> meter_;
     std::unique_ptr<proto::OpenAiStreamObserver> stream_observer_;
+    proto::AnthropicStreamState anthropic_state_;
+    std::unique_ptr<proto::StreamDecoder> decoder_;
+    std::unique_ptr<proto::StreamEncoder> encoder_;
     http::SseParser sse_parser_;
     std::string nonstream_body_;
     int upstream_status_ = 0;

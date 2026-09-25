@@ -76,13 +76,21 @@ void ProxySession::admit() {
         finish(Outcome::bad_request);
         return;
     }
-    auto meta = proto::parseOpenAiRequest(request_json_);
+    count_tokens_ = ingress_.http.path == "/v1/messages/count_tokens";
+    auto meta = ingress_.protocol == proto::Protocol::openai ? proto::parseOpenAiRequest(request_json_)
+                                                           : proto::parseAnthropicRequest(request_json_);
     if (!meta) {
         writeErrorResponse(400, proto::errorBody(ingress_.protocol, meta.error(), "invalid_request_error"), true);
         finish(Outcome::bad_request);
         return;
     }
+    if (ingress_.protocol == proto::Protocol::anthropic && !count_tokens_ &&
+        (!meta->max_tokens || *meta->max_tokens <= 0)) {
+        writeErrorResponse(400, proto::errorBody(ingress_.protocol, "max_tokens must be a positive integer", "invalid_request_error"), false);
+        finish(Outcome::bad_request); return;
+    }
     meta_ = *meta;
+    if (count_tokens_) { meta_.stream = false; request_json_["stream"] = false; }
 
     route_ = context_.config->findModel(meta_.model);
     if (route_ == nullptr) {
@@ -92,6 +100,14 @@ void ProxySession::admit() {
                            true);
         finish(Outcome::bad_request);
         return;
+    }
+    if (count_tokens_) {
+        bool supported = false;
+        for (const auto& name : route_->targets) if (context_.config->findUpstream(name)->count_tokens) supported = true;
+        if (!supported) {
+            writeErrorResponse(501, proto::errorBody(ingress_.protocol, "no upstream supports count_tokens", "not_implemented_error"), false);
+            finish(Outcome::bad_request); return;
+        }
     }
     checkLedgerAndQuota();
 }
@@ -207,7 +223,7 @@ void ProxySession::proceedAdmission() {
 
 bool ProxySession::cacheableRequest() const {
     ResponseCache* cache = context_.response_cache;
-    if (cache == nullptr || !cache->enabled()) return false;
+    if (count_tokens_ || cache == nullptr || !cache->enabled()) return false;
     bool bypass = false;
     bool force = false;
     if (auto header = ingress_.http.header("x-gateway-cache")) {
@@ -285,13 +301,15 @@ void ProxySession::writeCacheEntry() {
     if (meter_ == nullptr || meter_->value().source != AttemptUsage::Source::upstream_final) return;
     std::string finish;
     if (meta_.stream) {
-        if (!stream_observer_) return;
-        finish = stream_observer_->finishReason();
+        if (!decoder_) return;
+        finish = proto::encodeFinish(proto::decodeFinish(decoder_->finishReason(), upstream_protocol_), proto::Protocol::openai);
     } else {
         try {
             auto body = nlohmann::json::parse(nonstream_body_);
             if (body.contains("choices") && body["choices"].is_array() && !body["choices"].empty()) {
                 finish = body["choices"][0].value("finish_reason", "");
+            } else if (body.contains("stop_reason")) {
+                finish = proto::encodeFinish(proto::decodeFinish(body.value("stop_reason", ""), proto::Protocol::anthropic), proto::Protocol::openai);
             }
         } catch (...) {
             return;
@@ -324,6 +342,7 @@ void ProxySession::writeCacheEntry() {
 bool ProxySession::selectTarget() {
     while (target_index_ < route_->targets.size()) {
         const UpstreamConfig* candidate = context_.config->findUpstream(route_->targets[target_index_]);
+        if (count_tokens_ && candidate && !candidate->count_tokens) { ++target_index_; continue; }
         if (candidate == nullptr) {
             ++target_index_;
             attempt_in_target_ = 1;
@@ -399,6 +418,22 @@ void ProxySession::startAttempt(bool allow_idle, bool resend) {
         finish(Outcome::unavailable);
         return;
     }
+    upstream_protocol_ = target_->kind == "anthropic" ? proto::Protocol::anthropic : proto::Protocol::openai;
+    upstream_request_ = request_json_;
+    if (!count_tokens_ && ingress_.protocol != upstream_protocol_) {
+        auto neutral = proto::decodeRequest(request_json_, ingress_.protocol);
+        if (!neutral) {
+            writeErrorResponse(400, proto::errorBody(ingress_.protocol, neutral.error(), "invalid_request_error"), false);
+            finish(Outcome::bad_request); return;
+        }
+        neutral->model = target_->model;
+        try {
+            upstream_request_ = proto::encodeRequest(*neutral, upstream_protocol_, target_->default_max_tokens);
+        } catch (const std::exception& e) {
+            writeErrorResponse(400, proto::errorBody(ingress_.protocol, e.what(), "invalid_request_error"), false);
+            finish(Outcome::bad_request); return;
+        }
+    }
     key_ = http::UpstreamKey{target_->url.host, target_->url.port};
     if (!resend) {
         // 每次尝试独立计量与解析；请求级状态（committed_/ttft_/背压）跨尝试保留
@@ -411,6 +446,11 @@ void ProxySession::startAttempt(bool allow_idle, bool resend) {
         meter_ = std::make_unique<UsageMeter>(target_->metering);
         meter_finalized_ = false;
         stream_observer_.reset();
+        decoder_.reset();
+        encoder_.reset();
+        anthropic_state_ = proto::AnthropicStreamState{};
+        sse_parser_.reset();
+        cache_staging_.clear();
         nonstream_body_.clear();
         upstream_status_ = 0;
         upstream_headers_.clear();
@@ -466,7 +506,7 @@ void ProxySession::onAcquire(std::expected<http::Lease, http::AcquireError> resu
     }
 
     // final 计量的上游流中没有计数：准入时把发给上游的 max_tokens 限制为 remaining（来自 Redis，不是估算）
-    nlohmann::json upstream_json = request_json_;
+    nlohmann::json upstream_json = upstream_request_;
     if (target_->metering == "final" && quota_view_ && quota_view_->remaining) {
         int cap = meta_.max_tokens.value_or(route_ ? route_->default_max_tokens : 4096);
         if (quota_view_->remaining.has_value()) {
@@ -474,23 +514,35 @@ void ProxySession::onAcquire(std::expected<http::Lease, http::AcquireError> resu
         }
         upstream_json["max_tokens"] = cap;
     }
-    std::string upstream_body = proto::rewriteOpenAiRequest(upstream_json, target_->model, target_->metering,
-                                                            target_->extra_body, meta_.stream)
-                                     .dump();
+    if (upstream_protocol_ == proto::Protocol::openai && !count_tokens_) {
+        upstream_json = proto::rewriteOpenAiRequest(upstream_json, target_->model, target_->metering, target_->extra_body, meta_.stream);
+    } else {
+        upstream_json["model"] = target_->model;
+        if (!count_tokens_ && !upstream_json.contains("max_tokens")) upstream_json["max_tokens"] = target_->default_max_tokens;
+        if (target_->extra_body.is_object()) for (const auto& [key, value] : target_->extra_body.items())
+            if (!upstream_json.contains(key)) upstream_json[key] = value;
+    }
+    std::string upstream_body = upstream_json.dump();
 
     http::UpstreamRequest request;
     request.method = "POST";
-    request.path = (target_->url.path_prefix.empty() ? std::string() : target_->url.path_prefix) + "/chat/completions";
+    request.path = (target_->url.path_prefix.empty() ? std::string() : target_->url.path_prefix) + (count_tokens_ ? "/messages/count_tokens" : upstream_protocol_ == proto::Protocol::anthropic ? "/messages" : "/chat/completions");
     request.headers.emplace_back("content-type", "application/json");
     request.headers.emplace_back("accept-encoding", "identity");
     if (meta_.stream) request.headers.emplace_back("accept", "text/event-stream");
-    if (!target_->api_key.empty()) request.headers.emplace_back("authorization", "Bearer " + target_->api_key);
+    if (upstream_protocol_ == proto::Protocol::anthropic || count_tokens_) {
+        request.headers.emplace_back("anthropic-version", std::string(ingress_.http.header("anthropic-version").value_or("2023-06-01")));
+        if (auto beta = ingress_.http.header("anthropic-beta")) request.headers.emplace_back("anthropic-beta", std::string(*beta));
+        if (!target_->api_key.empty()) request.headers.emplace_back("x-api-key", target_->api_key);
+    } else if (!target_->api_key.empty()) request.headers.emplace_back("authorization", "Bearer " + target_->api_key);
     request.headers.emplace_back("x-request-id", ingress_.request_id);
     request.body = std::move(upstream_body);
 
     if (meta_.stream) {
-        stream_observer_ = std::make_unique<proto::OpenAiStreamObserver>(meter_.get(), meta_.client_wants_usage,
-                                                                         meta_.client_requested_metering);
+        if (upstream_protocol_ == proto::Protocol::openai)
+            stream_observer_ = std::make_unique<proto::OpenAiStreamObserver>(meter_.get(), meta_.client_wants_usage, meta_.client_requested_metering);
+        decoder_ = std::make_unique<proto::StreamDecoder>(upstream_protocol_);
+        encoder_ = std::make_unique<proto::StreamEncoder>(ingress_.protocol, meta_.model, ingress_.request_id, meta_.client_wants_usage);
     }
 
     last_connect_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(result->connect_time).count();
@@ -657,60 +709,61 @@ void ProxySession::onUpstreamBody(std::string_view data) {
 }
 
 void ProxySession::handleSseEvent(http::SseEvent&& event) {
-    if (finished_ || !stream_observer_) return;
-    auto result = stream_observer_->process(event.data);
-    // meter 更新后做配额判断与上报（usage-ledger.md §5.4）
-    onQuotaMeterUpdate();
-    if (finished_) return;
-    switch (result.action) {
-        case proto::OpenAiStreamObserver::Result::Action::drop:
-            if (!committed_ && meter_ && meter_->value().prompt_computed) {
-                SPDLOG_DEBUG("proxy: progress request_id={} computed={}", ingress_.request_id,
-                             *meter_->value().prompt_computed);
+    if (finished_ || !decoder_ || stream_completed_) return;
+    try {
+        proto::OpenAiStreamObserver::Result observed;
+        if (stream_observer_) observed = stream_observer_->process(event.data);
+        else proto::observeAnthropicUsage(nlohmann::json::parse(event.data), *meter_);
+        auto events = decoder_->feed(event.event, event.data);
+        for (const auto& e : events) {
+            if (const auto* f = std::get_if<proto::Finish>(&e); f && f->reason == proto::FinishReason::error) {
+                if (committed_) failCommitted(502, f->raw);
+                else attemptFailure(classifyPrecommitStreamFailure(), 0, f->raw, true, std::nullopt);
+                return;
             }
-            if (!committed_ && stream_observer_->sawProgress() && !first_progress_seen_) {
-                first_progress_seen_ = true;
-                cancelTimer(ttft_timer_);
-                startIdleTimer();
+            if (proto::isFirstTokenEvent(e)) meter_->markOutputSeen();
+        }
+        onQuotaMeterUpdate();
+        if (finished_) return;
+        if (!first_progress_seen_ && ((stream_observer_ && stream_observer_->sawProgress()) ||
+                                     (upstream_protocol_ == proto::Protocol::anthropic && meter_->value().prompt))) {
+            first_progress_seen_ = true; cancelTimer(ttft_timer_); startIdleTimer();
+        }
+        const auto& u = meter_->value();
+        encoder_->initialUsage({u.prompt.value_or(0), u.completion.value_or(0), u.cached.value_or(0)});
+        std::string framed;
+        for (const auto& e : events) {
+            if (proto::isFirstTokenEvent(e) && ttft_ == Duration::zero()) ttft_ = nowSteady() - ingress_.received_at;
+            auto encoded = encoder_->feed(e);
+            if (ingress_.protocol != upstream_protocol_) framed += encoded;
+        }
+        if (ingress_.protocol == upstream_protocol_) {
+            if (stream_observer_) {
+                if (observed.action == proto::OpenAiStreamObserver::Result::Action::forward ||
+                    observed.action == proto::OpenAiStreamObserver::Result::Action::done) framed = "data: " + observed.data + "\n\n";
+            } else framed = (event.event.empty() ? "" : "event: " + event.event + "\n") + "data: " + event.data + "\n\n";
+        }
+        if (!framed.empty()) {
+            if (ingress_.protocol == proto::Protocol::anthropic && upstream_protocol_ == proto::Protocol::anthropic) {
+                auto body = nlohmann::json::parse(event.data);
+                if (!committed_ && body.value("type", "") == "ping") return;
+                anthropic_state_.observe(body);
             }
-            return;
-        case proto::OpenAiStreamObserver::Result::Action::error:
-            if (committed_) {
-                failCommitted(502, "upstream stream error: " + result.error_message);
-            } else {
-                attemptFailure(classifyPrecommitStreamFailure(), 0,
-                               "upstream stream error: " + result.error_message, true, std::nullopt);
-            }
-            return;
-        case proto::OpenAiStreamObserver::Result::Action::done:
+            if (!committed_) commitStream();
+            stageCacheBytes(framed);
+            http::ResponseWriter writer(downstream_, ingress_.request_id, true);
+            writer.writeChunk(framed);
+        }
+        if (decoder_->done()) {
             stream_completed_ = true;
             if (!committed_) commitStream();
-            if (auto conn = downstream()) {
-                std::string framed = "data: " + result.data + "\n\n";
-                stageCacheBytes(framed);
-                http::ResponseWriter writer(downstream_, ingress_.request_id, true);
-                writer.writeChunk(framed);
-                writer.endStream();
-                endstream_sent_ = true;
-            }
-            if (exchange_ && exchange_->finished()) {
-                finalizeAttempt("ok", BreakerAction::success);
-                finish(Outcome::ok);
-            }
-            return;
-        case proto::OpenAiStreamObserver::Result::Action::forward:
-            break;
-    }
-
-    if (!committed_) commitStream();
-    if (result.first_token && ttft_ == Duration::zero()) {
-        ttft_ = nowSteady() - ingress_.received_at;
-    }
-    if (committed_) {
-        std::string framed = "data: " + result.data + "\n\n";
-        stageCacheBytes(framed);
-        http::ResponseWriter writer(downstream_, ingress_.request_id, true);
-        writer.writeChunk(framed);
+            http::ResponseWriter writer(downstream_, ingress_.request_id, true);
+            writer.endStream(); endstream_sent_ = true;
+            if (exchange_ && exchange_->finished()) { finalizeAttempt("ok", BreakerAction::success); finish(Outcome::ok); }
+        }
+    } catch (const std::exception& e) {
+        if (committed_) failCommitted(502, e.what());
+        else attemptFailure(classifyPrecommitStreamFailure(), 0, e.what(), true, std::nullopt);
     }
 }
 
@@ -736,7 +789,7 @@ void ProxySession::handleUpstreamErrorBody() {
     auto retry_after = retryAfterFromHeaders(upstream_headers_, nowSteady());
     std::string message = proto::extractErrorMessage(nonstream_body_);
     std::string body;
-    if (ingress_.protocol == proto::Protocol::openai) {
+    if (ingress_.protocol == upstream_protocol_) {
         body = nonstream_body_.empty() ? proto::errorBody(ingress_.protocol, message, "upstream_error")
                                        : nonstream_body_;
     } else {
@@ -754,12 +807,17 @@ void ProxySession::handleNonStreamBody() {
     if (meter_) {
         try {
             auto body = nlohmann::json::parse(nonstream_body_);
-            auto usage = proto::extractOpenAiUsage(body);
+            auto usage = upstream_protocol_ == proto::Protocol::openai ? proto::extractOpenAiUsage(body) : proto::extractAnthropicUsage(body);
             if (usage.present) {
                 meter_->onChunkUsage(usage.prompt, usage.completion, usage.cached);
                 meter_->markFinalUsage();
             }
-        } catch (...) {
+            if (count_tokens_) meter_->markRejected();
+            else if (ingress_.protocol != upstream_protocol_)
+                nonstream_body_ = proto::translateResponse(body, upstream_protocol_, ingress_.protocol, meta_.model, ingress_.request_id).dump();
+        } catch (const std::exception& e) {
+            attemptFailure(classifyPrecommitStreamFailure(), 0, std::string("invalid upstream response: ") + e.what(), true, std::nullopt);
+            return;
         }
     }
     finalizeAttempt("ok", BreakerAction::success);
@@ -836,7 +894,9 @@ void ProxySession::failCommitted(int status, const std::string& message) {
         err["error"]["type"] = "upstream_error";
         if (auto conn = downstream()) {
             http::ResponseWriter writer(downstream_, ingress_.request_id, true);
-            writer.writeChunk("data: " + err.dump() + "\n\n");
+            if (ingress_.protocol == proto::Protocol::anthropic)
+                writer.writeChunk("event: error\ndata: " + proto::anthropicErrorBody(err["error"]["message"].get<std::string>(), "api_error") + "\n\n");
+            else writer.writeChunk("data: " + err.dump() + "\n\n");
             writer.endStream();
             endstream_sent_ = true;
         }
@@ -851,7 +911,7 @@ void ProxySession::abortUpstream(const std::function<void()>& on_shutdown) {
         if (on_shutdown) on_shutdown();
         return;
     }
-    if (in_sse_feed_ || !stream_observer_) {
+    if (in_sse_feed_ || !decoder_) {
         // 正处在上游数据的 SSE 解析回调里（流内 error 事件）不能重入解析器；非流式响应体只在完整时才有 usage。
         // 这两种情况直接关闭，不排空
         exchange_->forceClose();
@@ -861,16 +921,24 @@ void ProxySession::abortUpstream(const std::function<void()>& on_shutdown) {
     // 排空的数据可能接近 1MB（下游或本 loop 落后时上游已发出大量 token），在 loop 线程里逐事件解析 JSON 代价太高。
     // 上游的计数（timings / usage / prompt_progress）都是累计值，所以只扫描 SSE 分帧、记下最后一个 JSON 事件，
     // 排空结束后只把它交给计量，结果与逐事件处理相同
-    std::string last_event;
+    std::string last_event, last_start, last_delta;
     exchange_->abortAndDrain(
-        [this, &last_event](std::string_view data) {
-            sse_parser_.feed(data, [&last_event](http::SseEvent&& event) {
+        [this, &last_event, &last_start, &last_delta](std::string_view data) {
+            sse_parser_.feed(data, [&last_event, &last_start, &last_delta](http::SseEvent&& event) {
+                if (event.event == "message_start") last_start = event.data;
+                if (event.event == "message_delta") last_delta = event.data;
                 if (event.data != "[DONE]") last_event = std::move(event.data);
             });
         },
         on_shutdown);
     if (!last_event.empty()) {
-        stream_observer_->process(last_event);
+        if (stream_observer_) stream_observer_->process(last_event);
+        else {
+            for (const auto* data : {&last_start, &last_delta}) if (!data->empty()) {
+                auto j = nlohmann::json::parse(*data, nullptr, false);
+                if (!j.is_discarded()) proto::observeAnthropicUsage(j, *meter_);
+            }
+        }
         const auto& usage = meter_->value();
         SPDLOG_DEBUG("proxy: drained request_id={} computed={} completion={}", ingress_.request_id,
                      usage.prompt_computed ? std::to_string(*usage.prompt_computed) : "null",
@@ -1301,6 +1369,15 @@ void ProxySession::truncateForQuota() {
     finalizeAttempt("fatal", BreakerAction::none);
     if (meta_.stream && committed_) {
         http::ResponseWriter writer(downstream_, ingress_.request_id, true);
+        if (ingress_.protocol == proto::Protocol::anthropic && encoder_) {
+            const auto& u = meter_->value();
+            proto::Usage usage{u.prompt.value_or(0), u.completion.value_or(0), u.cached.value_or(0)};
+            if (upstream_protocol_ == proto::Protocol::anthropic) writer.writeChunk(anthropic_state_.finish(usage));
+            else {
+                encoder_->feed(usage);
+                writer.writeChunk(encoder_->feed(proto::Finish{proto::FinishReason::length, "max_tokens"}));
+            }
+        } else {
         nlohmann::json chunk;
         nlohmann::json choice;
         choice["delta"] = nlohmann::json::object();
@@ -1322,6 +1399,7 @@ void ProxySession::truncateForQuota() {
             }
         }
         writer.writeChunk("data: [DONE]\n\n");
+        }
         writer.endStream();
         endstream_sent_ = true;
     }

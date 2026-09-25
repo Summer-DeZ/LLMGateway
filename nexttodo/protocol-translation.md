@@ -165,7 +165,7 @@ stop_reason：`end_turn`/`stop_sequence`→stop、`max_tokens`→length、`tool_
 | `Finish` | 关闭打开的块；`message_delta{"delta":{"stop_reason":R,"stop_sequence":null},"usage":{"input_tokens":P-C,"cache_read_input_tokens":C,"output_tokens":O}}`（P 为 prompt 总数，C 为缓存命中，O 为输出，均取自最终 usage）；`message_stop` |
 | `Finish{error}` | `event: error` + `{"type":"error","error":{"type":"api_error","message":…}}` |
 
-- 块 index `k` 从 0 开始，每打开一个新块加一；OpenAI 上游的工具参数可能与文本交错到达，按"切换块类型即关闭旧块"处理。
+- 块 index `k` 从 0 开始，每打开一个新块加一。当前工具块的参数即时转发；并行工具交错时暂存其他工具参数，待当前工具关闭后依序输出，避免向已关闭块追加参数。工具期间的文本暂存至工具结束；单工具暂存上限 4MiB。Anthropic 透传配额截断跟踪实际已发送块索引，不能使用转换编码器的内部索引收尾。
 - `message_start` 里的 token 数必须是上游报告的精确值（[policies.md §4.7](policies.md#47-其他用到-token-数的地方)）。
   `metering: llamacpp` 的上游在第一个 token 之前一定已经发过进度事件或 timings，所以 commit 时已知。
   `final` 计量的 OpenAI 上游（如 `qwen36-final`）此时还不知道，写 0，精确值在 `message_delta.usage.input_tokens` 里给出。

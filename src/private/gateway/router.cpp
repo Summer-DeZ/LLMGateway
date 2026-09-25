@@ -182,13 +182,12 @@ void Router::handle(const http::HttpRequest& request, const net::TcpConnectionPt
         return;
     }
 
-    // /v1/messages（Anthropic 入口）在 G14 实现之前按未知路径处理
-    if (path == "/v1/chat/completions") {
+    if (path == "/v1/chat/completions" || path == "/v1/messages" || path == "/v1/messages/count_tokens") {
         if (request.method != "POST") {
             methodNotAllowed(request, conn, "POST");
             return;
         }
-        proto::Protocol protocol = proto::Protocol::openai;
+        proto::Protocol protocol = guessProtocol(path);
         auto auth = authenticate(*context_.config, request);
         if (auth.user == nullptr) {
             http::ResponseWriter writer(conn, gw::randomHex(16), request.keepAlive());

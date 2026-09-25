@@ -26,8 +26,8 @@ flowchart LR
 | G11 | 用量账本（PostgreSQL）与配额（Redis）、流式超额截断 | 真实验收通过 | G10 + 容器已启动 |
 | G12 | 故障注入上游、重试、降级、熔断 | 真实验收通过（原 fault/503 验收 + 新 Nemotron/Gemma4 真实降级验收） | G11 |
 | G13 | 响应缓存 | 真实验收通过 | G12 |
-| G14 | Anthropic 入口与上游、协议转换 | 未开始 | G13 |
-| G15 | DAgent 对接、压测、设计文档 | 未开始 | G14 |
+| G14 | Anthropic 入口与上游、协议转换 | 真实验收通过 | G13 |
+| G15 | DAgent 对接、压测、设计文档 | 实施中 | G14 |
 
 项目只做本地：所有上游都是本机明文 HTTP 服务，不接远端/云端模型。原 G08（TLS）已移出范围，编号不复用。
 
@@ -458,6 +458,18 @@ POST /v1/chat/completions                        → 无故障，正常输出
 
 ## 6. 执行记录
 
+
+### G14：Anthropic 入口、上游与协议转换（2026-09-25）
+
+- 状态：真实验收通过。新增 `proto/{anthropic,translator}`；纯协议请求/响应映射、中立事件解码/编码、Anthropic 计量观察与透传块状态；接入 `/v1/messages`、`/v1/messages/count_tokens`。
+- 每次尝试重新编码请求并独占解码器/编码器，混合目标链沿用原重试状态机；同协议保留原始响应，跨协议输出入口格式，错误保持上游状态和原始 message。Anthropic 取消排空分别保留最后 message_start / message_delta 用量。
+- 跨协议并行工具流：当前工具参数立即输出，其他工具暂存至能顺序打开对应块，避免向已关闭块继续发送参数；单工具暂存上限 4MiB。这细化了规格“切换关闭”规则，以保留交错工具参数并维持合法 Anthropic 块状态。
+- 配额截断分别使用转换编码器或透传实际块状态收尾；修复审查发现的透传块编号错配、畸形 tool_choice 异常边界、Anthropic 必填 max_tokens 校验。
+- 构建与单测：dev/release 构建通过；143/143 单测通过，包含真实录制双并行工具样本的协议往返、请求映射、非流式互转、错误、交错块及截断状态。
+- 真实 SDK 验收：OpenAI/Anthropic 两入口 × 两上游协议的普通对话、SSE、流式工具调用及结果回传，共 15/15 通过；count_tokens 与直连一致（14）；跨协议图片 400；无计数能力 501。工具调用使用显式 tool_choice，避免模型选择直接作答导致误判。
+- 边界验收：畸形 tool_choice、缺少 max_tokens、错误 max_tokens 类型均为 400且进程继续服务；原生 Anthropic 配额截断流只有一个 message_start/message_stop，块均关闭，后续请求 429。
+- 证据：`temp/G14/tests-final.log`、`live-20260925-213540/`、`edges-20260925-213944/`；SDK 版本和接口以安装于 `temp/G14/venv` 的实际客户端为准，新版 Anthropic SDK 的 temperature 经 extra_body 传入。
+- 双轴审查原阻塞项修复后复核通过；下一任务 G15。
 
 ### G09–G13 验收提交前修复（2026-09-25）
 

@@ -5,45 +5,49 @@
 namespace gw::proto {
 
 std::expected<OpenAiRequestMeta, std::string> parseOpenAiRequest(const nlohmann::json& body) {
-    OpenAiRequestMeta meta;
-    if (!body.is_object()) return std::unexpected("request body must be a JSON object");
-    if (!body.contains("model") || !body.at("model").is_string()) {
-        return std::unexpected("missing or invalid 'model'");
-    }
-    meta.model = body.at("model").get<std::string>();
-    if (meta.model.empty()) return std::unexpected("model must not be empty");
-    if (!body.contains("messages") || !body.at("messages").is_array() || body.at("messages").empty()) {
-        return std::unexpected("missing or empty 'messages'");
-    }
-    if (body.contains("stream")) {
-        if (!body.at("stream").is_boolean()) return std::unexpected("'stream' must be a boolean");
-        meta.stream = body.at("stream").get<bool>();
-    }
-    if (body.contains("max_tokens") && !body.at("max_tokens").is_null()) {
-        meta.max_tokens = body.at("max_tokens").get<int>();
-    } else if (body.contains("max_completion_tokens") && !body.at("max_completion_tokens").is_null()) {
-        meta.max_tokens = body.at("max_completion_tokens").get<int>();
-    }
-    if (body.contains("temperature") && !body.at("temperature").is_null()) {
-        meta.temperature = body.at("temperature").get<double>();
-    }
-    if (body.contains("n") && body.at("n").is_number_integer()) {
-        meta.n_greater_than_one = body.at("n").get<int>() > 1;
-    }
-    if (body.contains("stream_options") && body.at("stream_options").is_object()) {
-        const auto& options = body.at("stream_options");
-        if (options.contains("include_usage") && options.at("include_usage").is_boolean()) {
-            meta.client_wants_usage = options.at("include_usage").get<bool>();
+    try {
+        OpenAiRequestMeta meta;
+        if (!body.is_object()) return std::unexpected("request body must be a JSON object");
+        if (!body.contains("model") || !body.at("model").is_string()) {
+            return std::unexpected("missing or invalid 'model'");
         }
+        meta.model = body.at("model").get<std::string>();
+        if (meta.model.empty()) return std::unexpected("model must not be empty");
+        if (!body.contains("messages") || !body.at("messages").is_array() || body.at("messages").empty()) {
+            return std::unexpected("missing or empty 'messages'");
+        }
+        if (body.contains("stream")) {
+            if (!body.at("stream").is_boolean()) return std::unexpected("'stream' must be a boolean");
+            meta.stream = body.at("stream").get<bool>();
+        }
+        if (body.contains("max_tokens") && !body.at("max_tokens").is_null()) {
+            meta.max_tokens = body.at("max_tokens").get<int>();
+        } else if (body.contains("max_completion_tokens") && !body.at("max_completion_tokens").is_null()) {
+            meta.max_tokens = body.at("max_completion_tokens").get<int>();
+        }
+        if (body.contains("temperature") && !body.at("temperature").is_null()) {
+            meta.temperature = body.at("temperature").get<double>();
+        }
+        if (body.contains("n") && body.at("n").is_number_integer()) {
+            meta.n_greater_than_one = body.at("n").get<int>() > 1;
+        }
+        if (body.contains("stream_options") && body.at("stream_options").is_object()) {
+            const auto& options = body.at("stream_options");
+            if (options.contains("include_usage") && options.at("include_usage").is_boolean()) {
+                meta.client_wants_usage = options.at("include_usage").get<bool>();
+            }
+        }
+        bool timings = body.value("timings_per_token", false);
+        bool progress = body.value("return_progress", false);
+        bool continuous = false;
+        if (body.contains("stream_options") && body.at("stream_options").is_object()) {
+            continuous = body.at("stream_options").value("continuous_usage_stats", false);
+        }
+        meta.client_requested_metering = timings || progress || continuous;
+        return meta;
+    } catch (const std::exception& e) {
+        return std::unexpected(std::string("invalid request: ") + e.what());
     }
-    bool timings = body.value("timings_per_token", false);
-    bool progress = body.value("return_progress", false);
-    bool continuous = false;
-    if (body.contains("stream_options") && body.at("stream_options").is_object()) {
-        continuous = body.at("stream_options").value("continuous_usage_stats", false);
-    }
-    meta.client_requested_metering = timings || progress || continuous;
-    return meta;
 }
 
 nlohmann::json rewriteOpenAiRequest(const nlohmann::json& original, const std::string& upstream_model,
@@ -152,7 +156,8 @@ OpenAiStreamObserver::Result OpenAiStreamObserver::process(std::string_view data
         const auto& choice = chunk.at("choices").at(0);
         if (choice.contains("delta") && choice.at("delta").is_object()) {
             const auto& delta = choice.at("delta");
-            if (delta.contains("content") && delta.at("content").is_string() && !delta.at("content").get<std::string>().empty()) {
+            if (delta.contains("content") && delta.at("content").is_string() &&
+                !delta.at("content").get<std::string>().empty()) {
                 delta_content = true;
             }
             if (delta.contains("reasoning_content") && delta.at("reasoning_content").is_string() &&
