@@ -11,4 +11,4 @@ Anthropic 编码器在首个输出前从 UsageMeter 获取精确输入计数；�
 当前限制：跨协议不传图片或供应商专属推理签名；final OpenAI 上游在 message_start 前没有输入计数时返回 0，最终 message_delta 补齐。原生同协议模型名保持上游真实值，转换输出使用客户端别名。
 
 
-规格与历史记录：[实施任务](../../nexttodo/implementation-tasks.md)。所有数值为 2026-09-25 本机实测，不代表远端部署结果。
+设计约束：[参考文档](../README.md#详细约束)。历史证据：[验收记录](../acceptance/history.md)。所有数值为 2026-09-25 本机实测，不代表远端部署结果。

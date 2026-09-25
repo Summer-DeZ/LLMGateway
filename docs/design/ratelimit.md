@@ -8,7 +8,7 @@ Redis 共享日/月累计额度；PG 保存每请求记录及日汇总。准入�
 
 实测：DAgent 在 TPM=20000 下先收到 429、释放占用额度后重试成功；日额度 4700 时，输入 3840 + 输出 861 触发截断（超额 1 token），下一轮 429 且不进行长重试。两入口文件操作和多轮会话的访问日志与 PG 输入/输出逐条相等。PG 表锁延迟写入时退出仍等待提交。
 
-部署密码来自环境变量或 deploy/.env。默认 home/gateway.json 未启用 PG/Redis；启用示例见 [usage-ledger](../../nexttodo/usage-ledger.md#8-配置)。配额限制是累计观测后的边界，流式分片/投机解码及并发上报可能产生小幅超额，不承诺绝对硬 token 截断。
+部署密码来自环境变量或 deploy/.env。默认 home/gateway.json 未启用 PG/Redis；启用示例见 [usage-ledger](../reference/usage-ledger.md#8-配置)。配额限制是累计观测后的边界，流式分片/投机解码及并发上报可能产生小幅超额，不承诺绝对硬 token 截断。
 
 
-规格与历史记录：[实施任务](../../nexttodo/implementation-tasks.md)。所有数值为 2026-09-25 本机实测，不代表远端部署结果。
+设计约束：[参考文档](../README.md#详细约束)。历史证据：[验收记录](../acceptance/history.md)。所有数值为 2026-09-25 本机实测，不代表远端部署结果。

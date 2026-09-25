@@ -9,4 +9,4 @@ HTTP/1.1 增量解析覆盖 Content-Length、chunked、连接关闭定界、响�
 真实 SDK 验收两入口×两种上游均通过；count_tokens 与直连一致（14 token）。健康接口 4 线程、256 连接、30 秒达到 550341.09 请求/秒，p99 2.07ms。
 
 
-规格与历史记录：[实施任务](../../nexttodo/implementation-tasks.md)。所有数值为 2026-09-25 本机实测，不代表远端部署结果。
+设计约束：[参考文档](../README.md#详细约束)。历史证据：[验收记录](../acceptance/history.md)。所有数值为 2026-09-25 本机实测，不代表远端部署结果。

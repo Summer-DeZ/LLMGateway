@@ -1,5 +1,9 @@
 # 策略：限流、缓存、可观测性与配置
 
+本文保留对外行为、线程归属、所有权和状态机约束；接口片段用于说明设计，具体签名以源代码为准。
+实现摘要、运行说明和历史验收见 [文档索引](../README.md)。
+
+
 ## 1. 限流
 
 ### 1.1 维度
@@ -230,7 +234,7 @@ struct AttemptUsage {
    这一步在 loop 线程里同步完成，**不能逐事件解析 JSON**：1MB 约有几千个事件，逐个解析会把整个 loop 卡住几十毫秒到数秒
    （Debug/asan 下更久；本 loop 落后后，其他流的上游缓冲又积满，形成连锁，2026-09-25 压测中实际出现过）。
    计数都是累计值（`timings`、`usage`、`prompt_progress`），所以只扫描 SSE 分帧、记下最后一个 JSON 事件，排空结束后只把它交给 UsageMeter。
-   G14 接 Anthropic 上游时注意：`message_start`（输入/缓存）与 `message_delta`（输出）是不同事件，两类各取最后一个。
+   Anthropic 上游：`message_start`（输入/缓存）与 `message_delta`（输出）是不同事件，两类各取最后一个。
 3. `close()`。
 
 这样记下的 `completion` 是**上游最后发出的那个 chunk 里的累计值**，是上游自己报告的精确数。
@@ -370,7 +374,7 @@ Anthropic 上游的 `prompt`/`cached` 在 `message_start` 之后已知，照常�
 
 账本、配额相关的 `users.*.quota`、`instance_id`、`postgres`、`redis`、`ledger`、`quota` 段见 [usage-ledger.md §8](usage-ledger.md#8-配置)。
 这些段是**可选**的：没有 `postgres` 段时不启动 ledger loop、不做 3a 检查、不入账；没有 `redis` 段时不创建 RedisClient。
-G00–G10 阶段用不带这些段的配置运行；G11 起 `home/gateway.json` 加上它们。
+当前 `home/gateway.json` 默认不带这些可选段；需要账本与配额时按 [运行与配置](../operations.md#账本与配额) 显式启用。
 任何 key 配置了 `quota` 但没有 `redis` 段，或者配置了 `redis` 但没有 `postgres` 段（无法做启动重建），都是启动错误。
 
 启动校验失败（未知字段类型错误、引用不存在、端口占用、PG/Redis 首次连接失败等）时打印具体原因并以非零码退出。不做热加载。

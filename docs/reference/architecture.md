@@ -1,5 +1,9 @@
 # 架构：模块、线程、所有权与构建
 
+本文保留对外行为、线程归属、所有权和状态机约束；接口片段用于说明设计，具体签名以源代码为准。
+实现摘要、运行说明和历史验收见 [文档索引](../README.md)。
+
+
 ## 1. 模块与依赖方向
 
 ```text
@@ -88,7 +92,7 @@ GatewayContext（main 栈上，生命周期覆盖所有 loop）
 1. main loop 通过 signalfd 收到 SIGINT/SIGTERM：停止 Acceptor（关闭监听 fd）。
 2. 向每个 io loop 投递"draining"：新请求一律 `503` + `Connection: close`；空闲 keep-alive 连接直接关闭。
 3. 等待活跃会话数归零，最长 `shutdown.drain_seconds`（默认 30s）；超时后对剩余会话执行取消（与客户端断开同一路径）。
-4. 退出所有 io loop → `LedgerWriter::flushAndStop()`（队列写完 PG）→ 退出 ledger loop → 关闭 resolver 线程 → `spdlog::shutdown()` 刷盘。
+4. 退出所有 io loop → `LedgerWriter::flushAndStop()`（等待排队及已发送但未提交的批次，受退出时限约束）→ 在 ledger loop 内销毁数据库客户端等对象 → 等待清理完成屏障 → 退出并 join ledger loop → 关闭 resolver 线程 → `spdlog::shutdown()` 刷盘。
 
 ## 5. 目录结构
 
@@ -124,8 +128,10 @@ LLMGateway/
 │  │               lru_cache_test.cpp translator_test.cpp retry_policy_test.cpp circuit_breaker_test.cpp url_test.cpp
 │  │               usage_meter_test.cpp resp_test.cpp quota_period_test.cpp usage_row_test.cpp config_test.cpp
 │  └─ fault_upstream/ main.cpp
-├─ docs/design/    （实现完成后写）
-├─ nexttodo/       （本规格）
+├─ docs/README.md  （文档索引）
+│  ├─ design/      （实现摘要与压测数据）
+│  ├─ reference/   （行为、线程、所有权与配置约束）
+│  └─ acceptance/  （历史验收记录）
 └─ temp/           （验收材料，已在 .gitignore）
 ```
 

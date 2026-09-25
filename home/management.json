@@ -1,0 +1,198 @@
+{
+  "server": {
+    "listen": "0.0.0.0:8080",
+    "io_threads": 8,
+    "max_body_bytes": 8388608,
+    "header_timeout_ms": 30000,
+    "body_timeout_ms": 60000,
+    "keepalive_idle_ms": 75000
+  },
+  "admin": {
+    "listen_local_only": true
+  },
+  "shutdown": {
+    "drain_seconds": 30
+  },
+  "log": {
+    "level": "info",
+    "file": "logs/management-gateway.log",
+    "access_file": "logs/management-access.log",
+    "slow_ms": 30000
+  },
+  "stream": {
+    "high_water_bytes": 262144,
+    "stall_ms": 60000
+  },
+  "dns": {
+    "cache_ttl_seconds": 60
+  },
+  "cache": {
+    "enabled": true,
+    "max_bytes": 268435456,
+    "max_entry_bytes": 4194304,
+    "ttl_seconds": 600
+  },
+  "users": {
+    "gk-dagent": {
+      "name": "dagent",
+      "rpm": 60,
+      "tpm": 400000
+    },
+    "gk-bench": {
+      "name": "bench",
+      "rpm": 0,
+      "tpm": 0
+    }
+  },
+  "upstreams": {
+    "qwen36": {
+      "kind": "openai-chat",
+      "base_url": "http://127.0.0.1:10010/v1",
+      "model": "Qwen3.6-35B-A3B",
+      "metering": "llamacpp",
+      "count_tokens": true,
+      "timeouts": {
+        "connect_ms": 3000,
+        "ttft_ms": 90000,
+        "idle_ms": 60000,
+        "total_ms": 600000,
+        "precommit_ms": 100000
+      },
+      "pool_idle_seconds": 4,
+      "breaker": {
+        "failure_threshold": 5,
+        "cooldown_ms": 30000
+      }
+    },
+    "qwen36-anth": {
+      "kind": "anthropic",
+      "base_url": "http://127.0.0.1:10010/v1",
+      "model": "Qwen3.6-35B-A3B",
+      "default_max_tokens": 8192,
+      "count_tokens": true
+    },
+    "nemotron": {
+      "kind": "openai-chat",
+      "base_url": "http://127.0.0.1:10011/v1",
+      "model": "Nemotron-3.5-Lightning-30B-A3B",
+      "metering": "llamacpp",
+      "timeouts": {
+        "connect_ms": 3000,
+        "ttft_ms": 90000,
+        "idle_ms": 60000,
+        "total_ms": 600000,
+        "precommit_ms": 100000
+      },
+      "pool_idle_seconds": 4,
+      "breaker": {
+        "failure_threshold": 5,
+        "cooldown_ms": 30000
+      }
+    },
+    "gemma4": {
+      "kind": "openai-chat",
+      "base_url": "http://127.0.0.1:10012/v1",
+      "model": "gemma-4-26B-A4B-it",
+      "metering": "llamacpp",
+      "timeouts": {
+        "connect_ms": 3000,
+        "ttft_ms": 90000,
+        "idle_ms": 60000,
+        "total_ms": 600000,
+        "precommit_ms": 100000
+      },
+      "pool_idle_seconds": 4,
+      "breaker": {
+        "failure_threshold": 5,
+        "cooldown_ms": 30000
+      }
+    },
+    "qwen36-final": {
+      "kind": "openai-chat",
+      "base_url": "http://127.0.0.1:10010/v1",
+      "model": "Qwen3.6-35B-A3B",
+      "metering": "final"
+    },
+    "fault": {
+      "kind": "openai-chat",
+      "base_url": "http://127.0.0.1:19000/v1",
+      "model": "fault",
+      "metering": "llamacpp"
+    }
+  },
+  "models": {
+    "qwen": {
+      "targets": [
+        "qwen36",
+        "nemotron",
+        "gemma4"
+      ],
+      "rpm": 120,
+      "tpm": 1000000,
+      "default_max_tokens": 4096,
+      "retry": {
+        "max_attempts": 2,
+        "base_ms": 500,
+        "max_ms": 8000,
+        "max_retry_after_ms": 10000
+      }
+    },
+    "qwen36": {
+      "targets": [
+        "qwen36"
+      ],
+      "rpm": 120,
+      "tpm": 1000000,
+      "default_max_tokens": 4096
+    },
+    "nemotron": {
+      "targets": [
+        "nemotron"
+      ],
+      "rpm": 120,
+      "tpm": 1000000,
+      "default_max_tokens": 4096
+    },
+    "gemma4": {
+      "targets": [
+        "gemma4"
+      ],
+      "rpm": 120,
+      "tpm": 1000000,
+      "default_max_tokens": 4096
+    },
+    "qwen-anth": {
+      "targets": [
+        "qwen36-anth"
+      ]
+    },
+    "qwen-final": {
+      "targets": [
+        "qwen36-final"
+      ]
+    },
+    "fault-demo": {
+      "targets": [
+        "fault",
+        "qwen36"
+      ],
+      "retry": {
+        "max_attempts": 3,
+        "base_ms": 200,
+        "max_ms": 2000
+      }
+    }
+  },
+  "pricing": {
+    "qwen36": {
+      "input": 0.1,
+      "output": 0.4
+    }
+  },
+  "management": {
+    "enabled": true
+  },
+  "postgres": {
+    "dsn": "env:GW_PG_DSN"
+  }
+}

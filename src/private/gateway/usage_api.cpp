@@ -173,7 +173,7 @@ void UsageApi::pgQuery(const net::TcpConnectionPtr& conn, const std::string& stm
 }
 
 void UsageApi::handleUsage(const http::HttpRequest& request, const net::TcpConnectionPtr& conn,
-                           const UserConfig& user) {
+                           std::shared_ptr<const UserConfig> user) {
     if (context_.ledger_writer == nullptr) {
         writeJson(conn, 503,
                   proto::errorBody(proto::Protocol::openai, "usage ledger not configured", "service_unavailable"));
@@ -185,8 +185,8 @@ void UsageApi::handleUsage(const http::HttpRequest& request, const net::TcpConne
     std::string end = queryParam(request.query, "end").value_or(start);
 
     auto weak_conn = std::weak_ptr<net::TcpConnection>(conn);
-    pgQuery(conn, "usage_daily_by_key", {user.name, start, end},
-            [this, weak_conn, &user, qc](std::expected<store::PgResult, store::PgError> r) {
+    pgQuery(conn, "usage_daily_by_key", {user->name, start, end},
+            [this, weak_conn, user, qc](std::expected<store::PgResult, store::PgError> r) {
                 auto conn = weak_conn.lock();
                 if (!conn) return;
                 if (!r) {
@@ -196,39 +196,39 @@ void UsageApi::handleUsage(const http::HttpRequest& request, const net::TcpConne
                     return;
                 }
                 nlohmann::json out;
-                out["key"] = user.name;
+                out["key"] = user->name;
                 nlohmann::json days = nlohmann::json::array();
                 for (const auto& row : r->rows) days.push_back(rowToDailyJson(row, false));
                 out["days"] = days;
                 out["total"] = dailyTotals(days);
 
                 auto* redis = redisOf(conn);
-                if (!user.quota || redis == nullptr || quota_ == nullptr) {
+                if (!user->quota || redis == nullptr || quota_ == nullptr) {
                     writeJson(conn, 200, out.dump());
                     return;
                 }
                 // 配额实时状态
                 int64_t day = quotaDayOf(wallMillis(), qc.utc_offset_minutes);
                 int64_t month = quotaMonthOf(wallMillis(), qc.utc_offset_minutes);
-                quota_->get(*redis, user.name, day, month,
-                            [this, weak_conn, &user, out = std::move(out),
+                quota_->get(*redis, user->name, day, month,
+                            [this, weak_conn, user, out = std::move(out),
                              qc](std::expected<QuotaUsage, store::RedisError> rq) mutable {
                                 auto conn = weak_conn.lock();
                                 if (!conn) return;
                                 if (rq) {
                                     nlohmann::json quota;
-                                    quota["daily_tokens"] = user.quota->daily_tokens;
-                                    quota["monthly_tokens"] = user.quota->monthly_tokens;
+                                    quota["daily_tokens"] = user->quota->daily_tokens;
+                                    quota["monthly_tokens"] = user->quota->monthly_tokens;
                                     quota["daily_used"] = rq->used_day;
                                     quota["monthly_used"] = rq->used_month;
-                                    quota["daily_remaining"] = user.quota->daily_tokens > 0
-                                                                   ? user.quota->daily_tokens - rq->used_day
+                                    quota["daily_remaining"] = user->quota->daily_tokens > 0
+                                                                   ? user->quota->daily_tokens - rq->used_day
                                                                    : -1;
-                                    quota["monthly_remaining"] = user.quota->monthly_tokens > 0
-                                                                     ? user.quota->monthly_tokens - rq->used_month
+                                    quota["monthly_remaining"] = user->quota->monthly_tokens > 0
+                                                                     ? user->quota->monthly_tokens - rq->used_month
                                                                      : -1;
                                     quota["resets_at"] =
-                                        nextResetIso(rq->used_day, rq->used_month, user, qc, wallMillis());
+                                        nextResetIso(rq->used_day, rq->used_month, *user, qc, wallMillis());
                                     out["quota"] = std::move(quota);
                                 } else {
                                     // 配额状态不可用：账本数据照常返回，去掉 quota 字段
@@ -240,7 +240,7 @@ void UsageApi::handleUsage(const http::HttpRequest& request, const net::TcpConne
 }
 
 void UsageApi::handleUsageRequests(const http::HttpRequest& request, const net::TcpConnectionPtr& conn,
-                                   const UserConfig& user) {
+                                   std::shared_ptr<const UserConfig> user) {
     if (context_.ledger_writer == nullptr) {
         writeJson(conn, 503,
                   proto::errorBody(proto::Protocol::openai, "usage ledger not configured", "service_unavailable"));
@@ -254,7 +254,7 @@ void UsageApi::handleUsageRequests(const http::HttpRequest& request, const net::
     std::optional<std::string> before = queryParam(request.query, "before");
 
     auto weak_conn = std::weak_ptr<net::TcpConnection>(conn);
-    pgQuery(conn, "usage_records_page", store::PgParams{user.name, before, std::to_string(limit)},
+    pgQuery(conn, "usage_records_page", store::PgParams{user->name, before, std::to_string(limit)},
             [this, weak_conn](std::expected<store::PgResult, store::PgError> r) {
                 auto conn = weak_conn.lock();
                 if (!conn) return;

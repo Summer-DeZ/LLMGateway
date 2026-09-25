@@ -11,6 +11,7 @@
 #include "gateway/admin.hpp"
 #include "gateway/auth.hpp"
 #include "gateway/metrics.hpp"
+#include "gateway/management.hpp"
 #include "gateway/proxy_session.hpp"
 #include "gateway/request_record.hpp"
 #include "gateway/usage_api.hpp"
@@ -84,6 +85,13 @@ Router::~Router() = default;
 void Router::handle(const http::HttpRequest& request, const net::TcpConnectionPtr& conn) {
     const std::string& path = request.path;
 
+    if (path == "/manage" || path.starts_with("/manage/") || path.starts_with("/api/manage/")) {
+        if (context_.management) { context_.management->handle(request, conn); return; }
+        http::ResponseWriter writer(conn, "", request.keepAlive());
+        writer.writeFull(404, {}, "text/plain", "not found");
+        server_.finishRequest(conn);
+        return;
+    }
     if (path == "/healthz") {
         if (request.method != "GET") {
             methodNotAllowed(request, conn, "GET");
@@ -151,18 +159,18 @@ void Router::handle(const http::HttpRequest& request, const net::TcpConnectionPt
             methodNotAllowed(request, conn, "GET");
             return;
         }
-        auto auth = authenticate(*context_.config, request);
+        auto auth = authenticate(*context_.config, request, context_.keys);
         if (auth.user == nullptr) {
             http::ResponseWriter writer(conn, gw::randomHex(16), request.keepAlive());
-            writer.writeFull(401, {}, "application/json",
-                             proto::errorBody(proto::Protocol::openai, "invalid api key", "authentication_error"));
-            logRejectedRequest(context_, request, "unauthorized", 401, nullptr);
+            writer.writeFull(auth.status, {}, "application/json",
+                             proto::errorBody(proto::Protocol::openai, auth.message, auth.status == 503 ? "service_unavailable" : "authentication_error"));
+            logRejectedRequest(context_, request, "unauthorized", auth.status, nullptr);
             server_.finishRequest(conn);
             return;
         }
         if (usage_api_ != nullptr) {
-            if (path == "/v1/usage") usage_api_->handleUsage(request, conn, *auth.user);
-            else usage_api_->handleUsageRequests(request, conn, *auth.user);
+            if (path == "/v1/usage") usage_api_->handleUsage(request, conn, auth.user);
+            else usage_api_->handleUsageRequests(request, conn, auth.user);
             return;  // 异步回复
         }
         http::ResponseWriter writer(conn, gw::randomHex(16), request.keepAlive());
@@ -188,16 +196,16 @@ void Router::handle(const http::HttpRequest& request, const net::TcpConnectionPt
             return;
         }
         proto::Protocol protocol = guessProtocol(path);
-        auto auth = authenticate(*context_.config, request);
+        auto auth = authenticate(*context_.config, request, context_.keys);
         if (auth.user == nullptr) {
             http::ResponseWriter writer(conn, gw::randomHex(16), request.keepAlive());
-            writer.writeFull(401, {}, "application/json",
-                             proto::errorBody(protocol, "invalid api key", "authentication_error"));
-            logRejectedRequest(context_, request, "unauthorized", 401, nullptr);
+            writer.writeFull(auth.status, {}, "application/json",
+                             proto::errorBody(protocol, auth.message, auth.status == 503 ? "service_unavailable" : "authentication_error"));
+            logRejectedRequest(context_, request, "unauthorized", auth.status, nullptr);
             server_.finishRequest(conn);
             return;
         }
-        handleProxy(protocol, request, conn, *auth.user);
+        handleProxy(protocol, request, conn, auth.user);
         return;
     }
 
@@ -217,12 +225,12 @@ void Router::methodNotAllowed(const http::HttpRequest& request, const net::TcpCo
 }
 
 void Router::handleModels(const http::HttpRequest& request, const net::TcpConnectionPtr& conn) {
-    auto auth = authenticate(*context_.config, request);
+    auto auth = authenticate(*context_.config, request, context_.keys);
     if (auth.user == nullptr) {
         http::ResponseWriter writer(conn, gw::randomHex(16), request.keepAlive());
-        writer.writeFull(401, {}, "application/json",
-                         proto::errorBody(proto::Protocol::openai, "invalid api key", "authentication_error"));
-        logRejectedRequest(context_, request, "unauthorized", 401, nullptr);
+        writer.writeFull(auth.status, {}, "application/json",
+                         proto::errorBody(proto::Protocol::openai, auth.message, auth.status == 503 ? "service_unavailable" : "authentication_error"));
+        logRejectedRequest(context_, request, "unauthorized", auth.status, nullptr);
         server_.finishRequest(conn);
         return;
     }
@@ -243,7 +251,7 @@ void Router::handleModels(const http::HttpRequest& request, const net::TcpConnec
 }
 
 void Router::handleProxy(proto::Protocol protocol, const http::HttpRequest& request,
-                         const net::TcpConnectionPtr& conn, const UserConfig& user) {
+                         const net::TcpConnectionPtr& conn, std::shared_ptr<const UserConfig> user) {
     auto* state = http::HttpServer::stateOf(conn);
     if (state == nullptr) return;
     if (state->session) {
@@ -259,7 +267,7 @@ void Router::handleProxy(proto::Protocol protocol, const http::HttpRequest& requ
     }
     ingress.received_at = nowSteady();
     ingress.http = request;
-    ingress.user = &user;
+    ingress.user = std::move(user);
 
     auto session = std::make_shared<ProxySession>(context_, server_, conn, std::move(ingress));
     state->session = std::static_pointer_cast<void>(session);

@@ -1,6 +1,7 @@
 #include "gateway/auth.hpp"
 
 #include "base/strings.hpp"
+#include "gateway/key_store.hpp"
 
 namespace gw::gateway {
 
@@ -20,12 +21,21 @@ std::optional<std::string> extractApiKey(const http::HttpRequest& request) {
     return std::nullopt;
 }
 
-AuthResult authenticate(const Config& config, const http::HttpRequest& request) {
+AuthResult authenticate(const Config& config, const http::HttpRequest& request, const KeyRegistry* keys) {
     auto key = extractApiKey(request);
     if (!key) return {nullptr, "missing api key"};
+    if (keys) {
+        auto identity = keys->find(*key);
+        if (identity.user) {
+            if (!keys->ready) return {nullptr, "key service unavailable", 503};
+            if (!identity.enabled) return {nullptr, "invalid api key"};
+            return {std::move(identity.user), {}};
+        }
+    }
     const UserConfig* user = config.findUser(*key);
+    if (!user && keys && !keys->ready) return {nullptr, "key service unavailable", 503};
     if (user == nullptr) return {nullptr, "invalid api key"};
-    return {user, {}};
+    return {std::make_shared<const UserConfig>(*user), {}};
 }
 
 }  // namespace gw::gateway

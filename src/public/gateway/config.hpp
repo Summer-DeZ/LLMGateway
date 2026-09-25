@@ -152,6 +152,7 @@ struct QuotaRuntimeConfig {
 struct Config {
     ServerConfig server;
     AdminConfig admin;
+    bool management_enabled = false;
     ShutdownConfig shutdown;
     LogConfig log;
     StreamConfig stream;

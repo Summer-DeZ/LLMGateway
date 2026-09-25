@@ -20,6 +20,7 @@
 #include "gateway/context.hpp"
 #include "gateway/ledger.hpp"
 #include "gateway/metrics.hpp"
+#include "gateway/management.hpp"
 #include "gateway/quota.hpp"
 #include "gateway/rate_limiter.hpp"
 #include "gateway/response_cache.hpp"
@@ -108,6 +109,9 @@ int main(int argc, char** argv) {
     std::shared_ptr<gw::store::RedisClient> ledger_redis;
     std::unique_ptr<gw::net::EventLoopThread> ledger_thread;
     std::unique_ptr<gw::gateway::UsageApi> usage_api;
+    gw::gateway::KeyRegistry key_registry;
+    std::unique_ptr<gw::gateway::KeyStore> key_store;
+    std::unique_ptr<gw::gateway::ManagementApi> management;
     gw::net::EventLoop* ledger_loop_ptr = nullptr;
 
     gw::http::HttpServerOptions options;
@@ -173,16 +177,22 @@ int main(int argc, char** argv) {
         }
         usage_api = std::make_unique<gw::gateway::UsageApi>(ctx, server, ledger_loop, pg_read, &quota_manager);
 
+        if (config->management_enabled) {
+            key_store = std::make_unique<gw::gateway::KeyStore>(ledger_loop, *config, key_registry);
+            management = std::make_unique<gw::gateway::ManagementApi>(ctx, server, ledger_loop, *key_store);
+            ctx.keys = &key_registry;
+            ctx.management = management.get();
+        }
         auto fail_startup = [](const std::string& reason) {
             SPDLOG_CRITICAL("startup failed: {}", reason);
             gw::log::shutdown();
             std::exit(1);
         };
-        auto on_pg_ready = [&pg_write, &pg_read, &ledger_writer, &ledger_redis, &quota_manager, &config,
+        auto on_pg_ready = [&pg_write, &pg_read, &ledger_writer, &ledger_redis, &quota_manager, &config, &key_store,
                             fail_startup](std::expected<void, gw::store::PgError> r) {
             if (!r) fail_startup("pg connect failed: " + r.error().message);
             // 迁移（advisory lock 保证多实例只有一个执行）
-            gw::gateway::runMigrations(*pg_write, [&](std::expected<void, std::string> mr) {
+            gw::gateway::runMigrations(*pg_write, [&, fail_startup](std::expected<void, std::string> mr) {
                 if (!mr) fail_startup("migration failed: " + mr.error());
                 SPDLOG_INFO("ledger: schema ready");
                 pg_write->prepare(gw::gateway::ledgerWriteStatements(),
@@ -190,8 +200,17 @@ int main(int argc, char** argv) {
                                       if (!r) fail_startup("pg write prepare failed: " + r.error().message);
                                   });
                 ledger_writer->start();
+                if (key_store) key_store->start();
                 // 配额启动重建：对每个配置了 quota 的 key，SET NX 当日/当月 PG 汇总
-                if (!ledger_redis || !config->redis) return;
+                if (!ledger_redis || !config->redis) {
+                    pg_read->connect([&pg_read, fail_startup](auto connected) {
+                        if (!connected) fail_startup("pg read connection failed");
+                        pg_read->prepare(gw::gateway::ledgerReadStatements(), [fail_startup](auto prepared) {
+                            if (!prepared) fail_startup("pg read prepare failed");
+                        });
+                    });
+                    return;
+                }
                 auto users = std::make_shared<std::vector<const gw::gateway::UserConfig*>>();
                 for (const auto& [k, u] : config->users) {
                     if (u.quota) users->push_back(&u);
@@ -320,7 +339,7 @@ int main(int argc, char** argv) {
 
         // 活跃会话归零后退出；loop 退出后定时器随之失效，不需要取消
         loop.runEvery(50ms, [&loop, &ctx] {
-            if (ctx.active_sessions.load() == 0) loop.quit();
+            if (ctx.active_sessions.load() == 0 && (!ctx.management || ctx.management->pending.load() == 0)) loop.quit();
         });
         loop.runAfter(std::chrono::seconds(config->shutdown.drain_seconds), [&loop, &ctx, &router] {
             int active = ctx.active_sessions.load();
@@ -336,6 +355,13 @@ int main(int argc, char** argv) {
 
     loop.loop();
 
+    // Ledger completion gate closes before IO loop destruction, including forced shutdown.
+    if (management) {
+        std::promise<void> gated;
+        auto gate_done = gated.get_future();
+        ledger_loop_ptr->queueInLoop([&] { management->stopCompletions(); gated.set_value(); });
+        gate_done.wait();
+    }
     // 先停 io 线程（剩余连接的 connectDestroyed 会回调 Router），再让 Router 等对象析构
     server.stop();
     sig_channel.disableAll();
@@ -350,6 +376,8 @@ int main(int argc, char** argv) {
         std::promise<void> cleaned;
         auto cleanup_done = cleaned.get_future();
         ledger_loop_ptr->queueInLoop([&] {
+            management.reset();
+            key_store.reset();
             usage_api.reset();
             ledger_writer.reset();
             ledger_redis.reset();

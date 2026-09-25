@@ -19,6 +19,8 @@ class RedisClient;
 
 namespace gw::gateway {
 
+class KeyRegistry;
+class ManagementApi;
 class AccessLog;
 class CircuitBreakerSet;
 class LedgerWriter;
@@ -41,6 +43,8 @@ struct GatewayContext {
     std::atomic<bool> draining{false};
     net::Resolver* resolver = nullptr;
     Metrics* metrics = nullptr;
+    KeyRegistry* keys = nullptr;
+    ManagementApi* management = nullptr;
     AccessLog* access_log = nullptr;
     RecentRequests* recent = nullptr;
     RateLimiter* rate_limiter = nullptr;

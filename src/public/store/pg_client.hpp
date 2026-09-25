@@ -60,6 +60,8 @@ public:
     // 异步建连；on_ready 在本 loop 上执行（成功一次；之后断线自动重连，不再回调）
     void connect(std::function<void(std::expected<void, PgError>)> on_ready);
     bool connected() const { return connected_; }
+    // Owner-loop only; useful before starting a control batch after reconnect/re-prepare.
+    bool idle() const { loop_->assertInLoopThread(); return connected_ && !in_pipeline_ && queue_.empty(); }
 
     // 预编译语句（连接建立后调用；可在迁移建表之后）。重复调用会替换语句集
     void prepare(std::vector<PgPreparedStatement> statements,

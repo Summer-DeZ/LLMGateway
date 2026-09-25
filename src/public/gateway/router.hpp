@@ -27,7 +27,7 @@ public:
 
 private:
     void handleProxy(proto::Protocol protocol, const http::HttpRequest& request,
-                     const net::TcpConnectionPtr& conn, const UserConfig& user);
+                     const net::TcpConnectionPtr& conn, std::shared_ptr<const UserConfig> user);
     void handleModels(const http::HttpRequest& request, const net::TcpConnectionPtr& conn);
     void methodNotAllowed(const http::HttpRequest& request, const net::TcpConnectionPtr& conn,
                           std::string_view allow);

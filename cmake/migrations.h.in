@@ -7,4 +7,8 @@ inline constexpr char kMigration001[] = R"sql(
 @GW_MIGRATION_001@
 )sql";
 
+inline constexpr char kMigration002[] = R"sql(
+@GW_MIGRATION_002@
+)sql";
+
 }  // namespace gw::gateway

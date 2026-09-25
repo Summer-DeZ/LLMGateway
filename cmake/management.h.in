@@ -1,0 +1,6 @@
+#pragma once
+namespace gw::gateway {
+inline constexpr char kManagementHtml[] = R"gw_asset(@GW_MANAGEMENT_HTML@)gw_asset";
+inline constexpr char kManagementJs[] = R"gw_asset(@GW_MANAGEMENT_JS@)gw_asset";
+inline constexpr char kManagementCss[] = R"gw_asset(@GW_MANAGEMENT_CSS@)gw_asset";
+}

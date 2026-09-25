@@ -148,14 +148,16 @@ void runMigrations(store::PgClient& client, std::function<void(std::expected<voi
                                             if (!qr->rows.empty() && qr->rows[0].columns[0]) {
                                                 applied = std::strtoll(qr->rows[0].columns[0]->c_str(), nullptr, 10);
                                             }
-                                            if (applied >= 1) {
+                                            if (applied >= 2) {
                                                 unlock(true, "");
                                                 return;
                                             }
                                             // 应用 001：按分号拆分（本项目迁移不使用带分号的字符串字面量）
                                             std::vector<std::string> sqls;
                                             std::string current;
-                                            for (char c : std::string(kMigration001)) {
+                                            const std::string migration = (applied < 1 ? std::string(kMigration001) : "") + kMigration002;
+                                            sqls.push_back("BEGIN");
+                                            for (char c : migration) {
                                                 if (c == ';') {
                                                     if (!current.empty()) sqls.push_back(current);
                                                     current.clear();
@@ -164,6 +166,9 @@ void runMigrations(store::PgClient& client, std::function<void(std::expected<voi
                                                 }
                                             }
                                             if (!current.empty()) sqls.push_back(current);
+                                            if (applied < 1) sqls.push_back("INSERT INTO schema_migrations (version) VALUES (1)");
+                                            sqls.push_back("INSERT INTO schema_migrations (version) VALUES (2)");
+                                            sqls.push_back("COMMIT");
                                             client.rawBatch(
                                                 std::move(sqls),
                                                 [&client, unlock](std::expected<void, store::PgError> ar) {
@@ -171,12 +176,7 @@ void runMigrations(store::PgClient& client, std::function<void(std::expected<voi
                                                         unlock(false, ar.error().message);
                                                         return;
                                                     }
-                                                    client.rawBatch(
-                                                        {"INSERT INTO schema_migrations (version) VALUES (1)"},
-                                                        [unlock](std::expected<void, store::PgError> ir) {
-                                                            unlock(ir.has_value(),
-                                                                   ir ? "" : ir.error().message);
-                                                        });
+                                                    unlock(true, "");
                                                 });
                                         });
                     });

@@ -54,7 +54,7 @@ public:
         std::string request_id;
         Timestamp received_at;
         http::HttpRequest http;
-        const UserConfig* user = nullptr;
+        std::shared_ptr<const UserConfig> user;
     };
 
     ProxySession(GatewayContext& context, http::HttpServer& server, net::TcpConnectionPtr conn, Ingress ingress);

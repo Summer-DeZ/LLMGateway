@@ -106,6 +106,7 @@ std::expected<std::shared_ptr<Config>, std::string> Config::load(const std::stri
             cfg->server.body_timeout = msOr(s, "body_timeout_ms", cfg->server.body_timeout);
             cfg->server.keepalive_idle = msOr(s, "keepalive_idle_ms", cfg->server.keepalive_idle);
         }
+        if (j.contains("management")) cfg->management_enabled = j.at("management").value("enabled", false);
         if (j.contains("admin")) {
             cfg->admin.listen_local_only = j.at("admin").value("listen_local_only", true);
         }
@@ -282,6 +283,12 @@ std::expected<std::shared_ptr<Config>, std::string> Config::load(const std::stri
         }
         if (any_quota && !cfg->redis) {
             return std::unexpected("a user has quota configured but no redis section");
+        }
+        if (cfg->management_enabled && !cfg->postgres) return std::unexpected("management requires postgres");
+        if (cfg->management_enabled) {
+            for (const auto& [key, user] : cfg->users) {
+                if (user.name.starts_with("managed:")) return std::unexpected("reserved managed: user name");
+            }
         }
         if (cfg->redis && !cfg->postgres) {
             return std::unexpected("redis section requires postgres section (quota rebuild)");

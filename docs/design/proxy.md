@@ -11,4 +11,4 @@
 真实 DAgent Esc 已产生 cancelled 访问记录，随后模型槽位为空。100 个慢读者均触发背压，RSS 峰值 22.25 MiB，见 [压测](benchmark.md)。
 
 
-规格与历史记录：[实施任务](../../nexttodo/implementation-tasks.md)。所有数值为 2026-09-25 本机实测，不代表远端部署结果。
+设计约束：[参考文档](../README.md#详细约束)。历史证据：[验收记录](../acceptance/history.md)。所有数值为 2026-09-25 本机实测，不代表远端部署结果。

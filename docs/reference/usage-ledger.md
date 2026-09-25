@@ -1,5 +1,9 @@
 # 用量账本与配额（PostgreSQL + Redis）
 
+本文保留对外行为、线程归属、所有权和状态机约束；接口片段用于说明设计，具体签名以源代码为准。
+实现摘要、运行说明和历史验收见 [文档索引](../README.md)。
+
+
 每个 API key 用了多少 token（输入、输出、缓存命中）要**可靠落盘、可查询、可对账**；每个 key 有日/月总量配额，
 超额时准入拒绝、流式中途直接截断。采用常见的后端分工：
 
@@ -54,7 +58,7 @@ services:
 - 构建依赖：`sudo apt install -y libpq-dev`；CMake 用 `pkg_check_modules(PQ REQUIRED IMPORTED_TARGET libpq)`。
   （`find_package(PostgreSQL)` 需要服务端开发头 `pg_type.h`，只装 libpq-dev 时会失败，所以用 pkg-config。）
 
-## 3. 新模块 `store`（`gw_store`，依赖 `gw_net`）
+## 3. 模块 `store`（`gw_store`，依赖 `gw_net`）
 
 两个数据库客户端都是**非阻塞、挂在 EventLoop 上**的，与上游 HTTP 客户端同一套 Reactor 用法。
 
@@ -221,8 +225,8 @@ public:
 - 主键 `ledger_id` 由网关生成（16 字节随机数的十六进制）。客户端的 `x-request-id` 可能重复，拿它当主键会让后一个请求被
   `DO NOTHING` 吞掉、少记账，所以它只存进 `client_request_id`。
 - **计费不可用就拒绝服务（fail closed）**：`healthy() == false` 时新请求在准入阶段返回 503，不继续提供服务再悄悄丢账。
-- 已知丢失窗口：进程崩溃时队列里未提交的行（最多约 200ms 的请求）会丢失；SIGTERM 优雅退出会先 `flushAndStop()`，不丢。
-  要求零丢失可以改成每请求同步提交，代价是吞吐降到 PG 提交速度，本期不采用，在设计文档里说明。
+- backlog 同时计算排队行和已出队但尚未提交的行；优雅退出等待两者排空，再通过清理完成屏障关闭 ledger loop。
+- 已知丢失窗口：进程崩溃会丢失尚未提交的记录；健康情况下通常按约 200ms 周期提交，数据库故障时积压可能更长。SIGTERM 最长等待 `shutdown.drain_seconds`，超时未写入的数据仍可能丢失，不能承诺无条件零丢失。
 
 ## 5. Redis 配额
 
@@ -266,19 +270,19 @@ return {d, m}
 
 ### 5.4 流式中的上报与截断判断
 
-每个 token 都访问一次 Redis 太浪费，也没必要。每个会话维护三个值：
+每个 token 都访问一次 Redis 太浪费，也没必要。每个会话维护以下值：
 
 ```text
 consumed   本请求各尝试已知 consumed 之和（policies.md §4.6），随 UsageMeter 更新
 projected  本请求各尝试已知 projected 之和（prompt 取总数 + completion），≥ consumed
 reported   已经用 quota_add 加到 Redis 的量
-remaining  最近一次从 Redis 得知的剩余额度（准入时、每次 quota_add 回复后更新）
+remaining  Redis 回复中的剩余额度，减去该回复之后仍在途的已上报增量
 ```
 
 - 每次 UsageMeter 更新：
   - **本地判断（用 projected）**：`projected − reported > remaining` → 超额：未提交则 429，已提交则截断。不等 Redis。
   - **上报（用 consumed）**：`consumed − reported ≥ quota.report_every_tokens`（默认 32）或距上次上报超过 `report_interval_ms` → `quota_add(consumed − reported)`；
-    回复里的 `used` 超过限额 → 同上处理，否则更新 `remaining`。
+    回复里的剩余额度减去后续在途增量后更新 `remaining`；超额时走同一拒绝/截断路径。未输出时必须中止上游、完成尝试计量并发送 429，不能只结束会话。
   - 判断用 projected、入账用 consumed 的原因：prompt 总数在预填充开始时就已知，用它判断可以在算力花出去之前拒绝超大 prompt；
     但实际只处理了一部分就被中止时，只按实际消耗扣额度。
 - 同一个 key 有多个并发流（可能分布在不同网关实例）时，每个流都只知道稍旧的 `remaining`，
@@ -389,3 +393,7 @@ remaining  最近一次从 Redis 得知的剩余额度（准入时、每次 quot
 | `gateway/usage_api.hpp` | `/v1/usage*`、`/admin/usage*`、`/admin/quota/reconcile` |
 
 （均为 `src/public/<模块>/` 下的 hpp 与 `src/private/<模块>/` 下同名的 cpp。）
+
+## 动态 API Key 身份
+
+G16–G20 增加动态密钥注册表。静态用户仍以配置 name 记账；页面创建的密钥使用稳定 `managed:<uuid>` 写入 key_name，展示名称独立保存。无历史数据迁移或同名合并，密钥摘要另存 api_keys 表。新管理 API 的所有 Token/请求计数使用十进制字符串传输，旧 usage 接口保持兼容。详细实现见 [API Key 管理](../design/management.md)。

@@ -1,7 +1,9 @@
 # LLMGateway
 
 基于自研 C++23 Reactor 的本机 LLM 网关，支持 OpenAI Chat 与 Anthropic Messages 两种入口及双向转换。
-**G00–G15 已完成真实验收**（G08/TLS 已移出范围）。实现、验收范围和历史问题见 [任务记录](nexttodo/implementation-tasks.md)。
+**G00–G15 已完成真实验收**（G08/TLS 已移出范围）。实现、验收范围和历史问题见 [验收记录](docs/acceptance/history.md)。
+
+完整文档入口：[docs/README.md](docs/README.md)。
 
 ## 架构与能力
 
@@ -63,7 +65,7 @@ curl -s "$GW/v1/models" -H "$AUTH"
 curl -s "$GW/healthz"
 ```
 
-默认 home/gateway.json 未启用 PostgreSQL/Redis。需要账本与配额时，按 [部署与配置规格](nexttodo/usage-ledger.md#8-配置) 启动 deploy/docker-compose.yml 中的专用容器并加入相关段；密码从环境变量或 deploy/.env 读取，配置使用 `env:GW_PG_DSN`。
+默认 home/gateway.json 未启用 PostgreSQL/Redis。需要账本与配额时，按 [运行与配置](docs/operations.md#账本与配额) 启动 deploy/docker-compose.yml 中的专用容器并加入相关段；密码从环境变量或 deploy/.env 读取，配置使用 `env:GW_PG_DSN`。
 
 ## DAgent 对接
 
@@ -82,3 +84,9 @@ curl -s "$GW/healthz"
 release：健康接口 **55.0 万 req/s / p99 2.07ms**，缓存命中 **34.7 万 req/s / p99 3.19ms**；1000 并发慢速流全部完成、RSS 峰值 28.88MiB。完整方法、TTFB 差值和背压边界见 [压测报告](docs/design/benchmark.md)。
 
 只接受本机明文 HTTP，不接远端云模型或 TLS。跨协议图片/document、n>1、JSON response_format 尚不支持；同协议透传保留上游能力。final 上游被取消时未报告的 token 保持未知；Nemotron/Gemma4 未配置单价，费用记 0。配额按流中累计计数观测，可能出现一个分片量级的超额；不宣称绝对硬截断。
+
+## API Key 管理页面
+
+使用 `./deploy/run-management.sh` 启动带 PostgreSQL 账本的管理配置，访问 `http://127.0.0.1:8080/manage/`。无需登录，支持创建/禁用密钥及查看按密钥的 Token 消耗，仅允许本机访问。
+
+数据库凭据从环境变量或 `deploy/.env` 读取；详见 [运行说明](docs/operations.md#api-key-管理页) 和 [验收记录](docs/acceptance/api-key-management.md)。

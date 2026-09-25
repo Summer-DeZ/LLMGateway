@@ -29,9 +29,9 @@ public:
     UsageApi(GatewayContext& context, http::HttpServer& server, net::EventLoop* ledger_loop,
              std::shared_ptr<store::PgClient> read_client, QuotaManager* quota);
 
-    void handleUsage(const http::HttpRequest& request, const net::TcpConnectionPtr& conn, const UserConfig& user);
+    void handleUsage(const http::HttpRequest& request, const net::TcpConnectionPtr& conn, std::shared_ptr<const UserConfig> user);
     void handleUsageRequests(const http::HttpRequest& request, const net::TcpConnectionPtr& conn,
-                             const UserConfig& user);
+                             std::shared_ptr<const UserConfig> user);
     void handleAdminUsage(const http::HttpRequest& request, const net::TcpConnectionPtr& conn);
     void handleAdminUsageRequests(const http::HttpRequest& request, const net::TcpConnectionPtr& conn);
     void handleReconcile(const http::HttpRequest& request, const net::TcpConnectionPtr& conn,

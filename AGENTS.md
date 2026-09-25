@@ -7,7 +7,7 @@
 5. 不修改、停止或重启正在被别人使用的模型服务；需要停 Qwen3.6 做降级演示时，先确认没有其他使用者。
 6. 真实密钥与数据库密码只从环境变量或 `deploy/.env` 读取（配置里写 `env:NAME`），不得写进配置文件、文档、日志和验收材料。
 7. 状态取值：未开始、实施中、构建通过待真实验收、真实验收通过、受环境阻塞。构建通过不等于完成。
-8. 本规格锁定的是对外行为、线程归属、对象所有权和状态机语义；类名、局部算法、容器选型可自行决定，偏离锁定部分时在任务记录里写明原因。
+8. 项目约定锁定的是对外行为、线程归属、对象所有权和状态机语义；类名、局部算法、容器选型可自行决定，偏离锁定部分时在对应设计文档和验收记录中写明原因。
 
 ## 构建与测试
 
@@ -17,4 +17,4 @@ ctest --preset dev --output-on-failure
 ./build/dev/llm-gateway -c home/gateway.json
 ```
 
-规格在 `nexttodo/`，按任务编号 G00–G15 推进，先读对应章节再动手。
+文档入口为 [docs/README.md](docs/README.md)。修改前先读 `docs/design/` 对应实现摘要与 `docs/reference/` 的行为、线程和所有权约束；验证方法见 [docs/validation.md](docs/validation.md)，历史验收记录在 `docs/acceptance/history.md`。

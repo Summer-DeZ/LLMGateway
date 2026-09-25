@@ -1,5 +1,9 @@
 # proto：OpenAI ↔ Anthropic 协议转换
 
+本文保留对外行为、线程归属、所有权和状态机约束；接口片段用于说明设计，具体签名以源代码为准。
+实现摘要、运行说明和历史验收见 [文档索引](../README.md)。
+
+
 模块 `gw_proto`，纯逻辑、不碰网络，全部可单测。映射规则与 DAgent 的
 `~/DAgent/src/private/llm/provider_chat.cpp`、`provider_anthropic.cpp` 保持一致（system 合并、并行工具结果合并、usage 累计值等）。
 
