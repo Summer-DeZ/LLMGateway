@@ -1,4 +1,5 @@
 #include "gateway/usage_meter.hpp"
+#include <algorithm>
 
 namespace gw::gateway {
 
@@ -17,7 +18,8 @@ UsageMeter::UsageMeter(std::string metering) : metering_(std::move(metering)) {}
 void UsageMeter::onPromptProgress(std::int64_t total, std::int64_t cache, std::int64_t processed) {
     usage_.prompt = total;
     usage_.cached = cache;
-    usage_.prompt_computed = processed;
+    // llama.cpp reports the total populated prompt position, including cache hits.
+    usage_.prompt_computed = std::max<std::int64_t>(0, processed - cache);
 }
 
 void UsageMeter::onTimings(std::int64_t cache_n, std::int64_t prompt_n, std::int64_t predicted_n) {

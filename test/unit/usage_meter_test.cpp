@@ -190,3 +190,14 @@ TEST(OpenAiStreamObserverTest, ErrorChunk) {
     EXPECT_EQ(r.action, gw::proto::OpenAiStreamObserver::Result::Action::error);
     EXPECT_EQ(r.error_message, "boom");
 }
+
+TEST(UsageMeterTest, CachedPromptProgressDoesNotCountCacheTwice) {
+    gw::gateway::UsageMeter meter("llamacpp");
+    meter.onTimings(80, 0, 0);
+    meter.onPromptProgress(100, 80, 85);
+    EXPECT_EQ(meter.value().prompt_computed, 5);
+    EXPECT_EQ(meter.value().consumed(), 85);
+    meter.onPromptProgress(100, 80, 100);
+    EXPECT_EQ(meter.value().prompt_computed, 20);
+    EXPECT_EQ(meter.value().consumed(), 100);
+}

@@ -27,7 +27,7 @@ flowchart LR
 | G12 | 故障注入上游、重试、降级、熔断 | 真实验收通过（原 fault/503 验收 + 新 Nemotron/Gemma4 真实降级验收） | G11 |
 | G13 | 响应缓存 | 真实验收通过 | G12 |
 | G14 | Anthropic 入口与上游、协议转换 | 真实验收通过 | G13 |
-| G15 | DAgent 对接、压测、设计文档 | 实施中 | G14 |
+| G15 | DAgent 对接、压测、设计文档 | 真实验收通过 | G14 |
 
 项目只做本地：所有上游都是本机明文 HTTP 服务，不接远端/云端模型。原 G08（TLS）已移出范围，编号不复用。
 
@@ -458,6 +458,20 @@ POST /v1/chat/completions                        → 无故障，正常输出
 
 ## 6. 执行记录
 
+
+### G15：DAgent 对接、压测与设计文档（2026-09-25）
+
+- 状态：真实验收通过。用户本轮要求继续完成 G14/G15，按此授权备份并修改 `~/DAgent/home/models.json`，新增 gw-qwen/gw-claude，保留默认配置；备份为同目录 models.json.G15.bak（0600）。DAgent 代码未改，实际验收使用隔离 home 与临时端口。
+- 七类 DAgent 场景全部完成：双协议文件工具、多轮持久会话、Esc 取消/槽位释放、TPM=20000 的429后成功重试、真实Nemotron降级/熔断跳过、usage与PG核对、额度4700中途截断和下一轮429。
+- 用量：13条请求PG与访问日志输入/输出逐条相等；DAgent三轮合计与API/访问日志的input=55635、output=1470、cached=50387一致。另有独立UI用量截图和API核对。
+- 配额：真实DAgent输入3840+输出861达到4701时按4700额度截断；下一轮Retry-After=7887，DAgent直接报告等待过长。场景发现并修复：Redis预输出阶段超额未发429；当前llama.cpp progress.processed包含cache引起重复计量；在途增量与Redis旧回复口径不一致。
+- 偏离旧规格：`prompt_computed=processed` 按现场上游源码与真实缓存进度修正为 `max(0,processed-cache)`；录制显示total1020/cache1016/processed1016→1020，对应computed0→4。该调整修正旧规格对上游字段的解释，不引入token估算。
+- 压测：release healthz 550341.09 req/s、p99 2.07ms；缓存347312.35 req/s、p99 3.19ms；直连/网关20次TTFB中位数4.1615/45.7400ms；1000流0错误、RSS峰值28.88MiB；100真实慢读者触发100次背压，RSS峰值22.25MiB。
+- 测量说明：慢读者先禁读10秒，再约200B/s读取5秒后取消，接收缓冲收紧；首轮客户端大缓冲结果不作为背压证据。RSS含基线、读批次与allocator，不能等同100×high_water；TTFB差值包含响应提交时机。详见benchmark.md。
+- 文档：8份 `docs/design/{net,http,proxy,protocol,ratelimit,cache,observability,benchmark}.md`，README架构/能力/启动/DAgent接入说明。
+- 构建与单测：dev/release通过；144/144单测通过。配额修复双轴复核通过。
+- 证据：`temp/G15/RESULT.md`，`dagent-20260925-213853/`，`tui-20260925-214435/`（除旧quota失败），`tui-20260925-214816/`（最终quota），`tui-20260925-215228/`（UI usage），`benchmark-20260925-214107/`、`benchmark-20260925-214516/`。
+- 运行状态：临时验收进程均退出；三模型保持运行；用户可按README启动8080网关。未部署常驻网关；默认配置PG/Redis仍为显式可选，本次账本验收使用临时启用配置。
 
 ### G14：Anthropic 入口、上游与协议转换（2026-09-25）
 

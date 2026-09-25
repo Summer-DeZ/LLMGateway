@@ -172,7 +172,7 @@ nlohmann 默认用 `std::map` 存对象，键天然有序，`dump()` 结果就�
 
 | `metering` | 适用上游 | 网关注入到上游请求 | 能拿到的精确计数 |
 | --- | --- | --- | --- |
-| `llamacpp` | `openai-chat` kind 指向 llama-server（Qwen3.6、Qwen3.8） | `timings_per_token: true`；流式再加 `return_progress: true` | 预填充期间：`prompt_progress{total, cache, processed}`；之后每个 chunk：累计的 `timings{cache_n, prompt_n, predicted_n}`；结束时 `usage` |
+| `llamacpp` | `openai-chat` kind 指向 llama-server（Qwen3.6、Nemotron、Gemma4） | `timings_per_token: true`；流式再加 `return_progress: true` | 预填充期间：`prompt_progress{total, cache, processed}`；之后每个 chunk：累计的 `timings{cache_n, prompt_n, predicted_n}`；结束时 `usage` |
 | `vllm` | `openai-chat` kind 指向 vLLM | `stream_options.continuous_usage_stats: true` | 每个 chunk 的累计 `usage` |
 | `final`（默认） | 所有 `anthropic` kind（`qwen36-anth`）；不发进度/计数的 OpenAI 兼容上游（本地用 `qwen36-final` 模拟） | OpenAI 加 `stream_options.include_usage: true` | 只在流结束时有 `usage`；Anthropic 另外在 `message_start` 里给出精确的输入与缓存 token |
 
@@ -199,7 +199,7 @@ struct AttemptUsage {
 
 | 上游事件 | 更新 |
 | --- | --- |
-| llama.cpp `prompt_progress` | `prompt = total`，`cached = cache`，`prompt_computed = processed` |
+| llama.cpp `prompt_progress` | `prompt = total`，`cached = cache`，`prompt_computed = max(0, processed - cache)`（processed 是包含缓存的 prompt 位置，已按当前 llama.cpp 源码及真实缓存命中进度核实） |
 | llama.cpp chunk 的 `timings` | `cached = cache_n`，`prompt_computed = prompt_n`，`prompt = cache_n + prompt_n`，`completion = predicted_n` |
 | vLLM chunk 的 `usage` | `prompt`、`completion`、`cached`（`prompt_tokens_details.cached_tokens`）覆盖 |
 | Anthropic `message_start` | `cached = cache_read_input_tokens`，`prompt = input_tokens + cache_read + cache_creation` |

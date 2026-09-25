@@ -1291,23 +1291,7 @@ void ProxySession::onQuotaMeterUpdate() {
     }
     // 本地判断（projected，不等 Redis）：prompt 总数在预填充开始就已知，超大 prompt 在算力花出去前拒绝
     if (quota_view_->overBudget()) {
-        if (!committed_) {
-            http::Headers headers;
-            headers.emplace_back("retry-after",
-                                 std::to_string(std::max<std::int64_t>(
-                                     secondsToNextLocalMidnight(wallMillis(),
-                                                                context_.config->quota.utc_offset_minutes),
-                                     1)));
-            writeErrorResponse(429, proto::errorBody(ingress_.protocol, "token quota exceeded",
-                                                     ingress_.protocol == proto::Protocol::anthropic
-                                                         ? "rate_limit_error"
-                                                         : "insufficient_quota",
-                                                     "insufficient_quota"),
-                               false, headers);
-            if (context_.metrics) context_.metrics->observeQuotaRejection(ingress_.user->name);
-            finish(Outcome::quota_exceeded);
-            return;
-        }
+        if (!committed_) { rejectForQuota(); return; }
         truncateForQuota();
         return;
     }
@@ -1323,6 +1307,20 @@ void ProxySession::onQuotaMeterUpdate() {
     }
 }
 
+void ProxySession::rejectForQuota() {
+    if (finished_) return;
+    abortUpstream();
+    finalizeAttempt("fatal", BreakerAction::none);
+    http::Headers headers{{"retry-after", std::to_string(std::max<std::int64_t>(1,
+        secondsToNextLocalMidnight(wallMillis(), context_.config->quota.utc_offset_minutes)))},
+        {"x-gateway-quota-remaining-tokens", "0"}};
+    writeErrorResponse(429, proto::errorBody(ingress_.protocol, "token quota exceeded",
+        ingress_.protocol == proto::Protocol::anthropic ? "rate_limit_error" : "insufficient_quota",
+        "insufficient_quota"), false, headers);
+    if (context_.metrics) context_.metrics->observeQuotaRejection(ingress_.user->name);
+    finish(Outcome::quota_exceeded);
+}
+
 void ProxySession::sendQuotaAdd(std::int64_t delta) {
     auto* redis = redisClient();
     if (redis == nullptr || context_.quota_manager == nullptr || ingress_.user == nullptr || delta <= 0) return;
@@ -1330,8 +1328,9 @@ void ProxySession::sendQuotaAdd(std::int64_t delta) {
     int64_t day = quotaDayOf(wallMillis(), qc.utc_offset_minutes);
     int64_t month = quotaMonthOf(wallMillis(), qc.utc_offset_minutes);
     std::weak_ptr<ProxySession> weak = shared_from_this();
+    const auto reported_at_send = quota_view_ ? quota_view_->reported : 0;
     context_.quota_manager->add(*redis, ingress_.user->name, day, month, delta,
-                                [weak](std::expected<QuotaUsage, store::RedisError> result) {
+                                [weak, reported_at_send](std::expected<QuotaUsage, store::RedisError> result) {
                                     auto self = weak.lock();
                                     if (!self) return;  // finish 后的 fire-and-forget 回复：忽略
                                     if (!result) {
@@ -1348,12 +1347,13 @@ void ProxySession::sendQuotaAdd(std::int64_t delta) {
                                         int64_t mr = q.monthly_tokens - result->used_month;
                                         remaining = remaining ? std::min(*remaining, mr) : mr;
                                     }
+                                    if (remaining) *remaining -= self->quota_view_->reported - reported_at_send;
                                     self->quota_view_->remaining = remaining;
                                     if (remaining.has_value() && *remaining <= 0) {
                                         if (self->committed_) {
                                             self->truncateForQuota();
                                         } else {
-                                            self->finish(Outcome::quota_exceeded);
+                                            self->rejectForQuota();
                                         }
                                     }
                                 });

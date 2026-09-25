@@ -134,6 +134,7 @@ private:
     void sendQuotaAdd(std::int64_t delta);
     // 流式超额截断：按取消路径停上游 + 按协议正常收尾下游（usage-ledger.md §6）
     void truncateForQuota();
+    void rejectForQuota();
     // G09：汇总 RequestRecord → Metrics / AccessLog / RecentRequests / 慢请求日志 / 账本
     void observeFinish();
     const char* cancellationStage() const;
