@@ -1,6 +1,55 @@
-/temp
-/build
-/logs
-/data
-deploy/.env
+# Build output and local CMake configuration
+/build/
+/cmake-build-*/
+/out/
+CMakeUserPresets.json
 compile_commands.json
+CMakeCache.txt
+CMakeFiles/
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+
+# Runtime data, logs, and acceptance artifacts
+/data/
+/logs/
+/temp/
+*.log
+*.pid
+*.sock
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Local environment and credentials; keep sanitized examples
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+
+# Local configuration overrides
+/home/*.local.json
+/home/*-local.json
+
+# Editor state and temporary files
+/.idea/
+/.vscode/*
+!/.vscode/settings.json
+!/.vscode/extensions.json
+*.swp
+*.swo
+*~
+*.bak
+*.orig
+*.rej
+.DS_Store
+Thumbs.db
