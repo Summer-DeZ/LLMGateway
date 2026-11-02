@@ -15,19 +15,13 @@
   <body>
     <aside class="sidebar">
       <a class="brand" href="/manage/" aria-label="LLMGateway 首页"
-        ><span class="brand-mark">G</span
-        ><span>LLMGateway<small>模型网关</small></span></a
+        ><span class="brand-mark">G</span><span>LLMGateway</span></a
       >
       <div class="nav-label">工作空间</div>
       <a class="nav-item active" href="/manage/" aria-current="page"
         ><span aria-hidden="true">⌘</span> API 密钥
         <span class="nav-arrow" aria-hidden="true">↗</span></a
       >
-      <div class="sidebar-footer">
-        <span class="status-dot"></span> 本机管理<span class="version-label"
-          >SELF-HOSTED</span
-        >
-      </div>
     </aside>
     <div class="workspace">
       <header class="topbar">
@@ -40,33 +34,22 @@
       <main>
         <div class="page-heading">
           <div>
-            <p class="eyebrow">API ACCESS</p>
-            <h1>你的密钥，你的用量。</h1>
-            <p class="subtitle">
-              为每个调用方创建独立密钥，清楚掌握每一份 Token 消耗。
-            </p>
+            <h1>API 密钥</h1>
           </div>
           <button id="create-open" class="button primary">
             <span aria-hidden="true">＋</span> 创建密钥
           </button>
         </div>
         <div class="notice">
-          <span class="notice-icon" aria-hidden="true">↗</span>
-          <div>
-            <strong>连接你的客户端</strong>
-            <p>
-              使用这里创建的密钥调用网关，支持 OpenAI 和 Anthropic 两种接口。
-            </p>
-          </div>
+          <strong>API 地址</strong>
           <code id="endpoint">—</code>
         </div>
         <section class="key-panel" aria-labelledby="keys-heading">
           <div class="panel-heading">
             <div>
               <h2 id="keys-heading">
-                API 密钥 <span id="key-count" class="count">—</span>
+                密钥列表 <span id="key-count" class="count">—</span>
               </h2>
-              <p>管理已创建的密钥与实际消耗</p>
             </div>
             <button id="refresh" class="button secondary">
               <span aria-hidden="true">↻</span> 刷新
@@ -90,8 +73,7 @@
           </div>
           <div id="list-empty" class="empty" hidden>
             <span class="empty-symbol" aria-hidden="true">⌘</span>
-            <h3>从第一把密钥开始</h3>
-            <p>为应用创建独立密钥，用量会在调用后自动记录。</p>
+            <h3>暂无密钥</h3>
             <button id="empty-create" class="button secondary">创建密钥</button>
           </div>
           <div id="list-loading" class="loading" role="status">
@@ -109,29 +91,7 @@
             </div>
           </div>
         </section>
-        <details class="usage-help" id="usage-help">
-          <summary>这些 Token 数字如何计算？</summary>
-          <div class="help-grid">
-            <p>
-              <strong>实际消耗</strong
-              >来自已入账的上游调用，包含重试和降级时已知的消耗。进行中的请求会在结束后更新。
-            </p>
-            <p>
-              <strong>缓存有两种</strong>上游缓存 Token
-              已包含在输入中；网关直接复用响应时，本次实际消耗为 0。
-            </p>
-            <p>
-              <strong>不完整的报告</strong
-              >取消或异常可能让上游无法完整上报。此时会标注，已知消耗不代表最终完整用量。
-            </p>
-          </div>
-        </details>
-        <footer class="page-footer">
-          <span
-            >LLMGateway
-            <span class="footer-dot">·</span> 简单管理，专注调用。</span
-          ><span id="timezone">用量按网关计费时区统计</span>
-        </footer>
+        <footer class="page-footer"><span id="timezone"></span></footer>
       </main>
     </div>
 
@@ -139,7 +99,6 @@
       <form id="create-form">
         <div class="dialog-heading">
           <div>
-            <p class="eyebrow">NEW API KEY</p>
             <h2 id="create-title">创建 API 密钥</h2>
           </div>
           <button
@@ -151,9 +110,6 @@
             ×
           </button>
         </div>
-        <p class="dialog-description">
-          为密钥取一个容易识别的名称，例如客户端或项目名。
-        </p>
         <label for="key-name">密钥名称</label
         ><input
           id="key-name"
@@ -162,7 +118,6 @@
           autocomplete="off"
           required
         />
-        <p class="field-hint">1–64 个字符；同名密钥的消耗会分别统计。</p>
         <p id="create-error" class="form-error" role="alert" hidden></p>
         <div class="dialog-actions">
           <button type="button" id="create-cancel" class="button secondary">
@@ -176,9 +131,7 @@
     <dialog id="secret-dialog" class="modal" aria-labelledby="secret-title">
       <div class="success-mark" aria-hidden="true">✓</div>
       <h2 id="secret-title">密钥已创建</h2>
-      <p class="dialog-description">
-        完整密钥仅此次显示，请现在复制并妥善保存。
-      </p>
+      <p class="dialog-description">密钥仅显示一次，请保存。</p>
       <label for="key-secret">API Key</label
       ><textarea
         id="key-secret"
@@ -190,9 +143,7 @@
       ><button id="copy-secret" class="button secondary full-width">
         复制密钥
       </button>
-      <p id="copy-status" class="field-hint" role="status">
-        关闭后无法再次查看完整密钥。
-      </p>
+      <p id="copy-status" class="field-hint" role="status"></p>
       <div class="dialog-actions">
         <button id="secret-close" class="button primary">我已保存，关闭</button>
       </div>
@@ -201,7 +152,7 @@
       <h2 id="disable-title">禁用这把密钥？</h2>
       <p id="disable-name" class="disable-name"></p>
       <p class="dialog-description">
-        禁用后将拒绝新的调用，已开始的请求可继续完成。历史用量会保留，此操作不可恢复。
+        禁用后拒绝新请求，历史用量保留。此操作不可恢复。
       </p>
       <p id="disable-error" class="form-error" role="alert" hidden></p>
       <div class="dialog-actions">
@@ -212,7 +163,6 @@
     <dialog id="detail-dialog" class="drawer" aria-labelledby="detail-title">
       <div class="drawer-header">
         <div>
-          <p class="eyebrow">KEY USAGE</p>
           <h2 id="detail-title">用量详情</h2>
           <p id="detail-key" class="mono muted"></p>
         </div>
@@ -236,7 +186,9 @@
         <p id="detail-loading" class="muted" role="status">正在读取用量…</p>
         <div id="usage-cards" class="usage-cards">
           <div class="usage-card accent">
-            <span>实际消耗 Token</span><strong id="metric-billable">—</strong>
+            <span title="已入账用量，进行中的请求结束后更新"
+              >实际消耗 Token</span
+            ><strong id="metric-billable">—</strong>
           </div>
           <div class="usage-card">
             <span>输入 Token</span><strong id="metric-input">—</strong>
@@ -245,13 +197,11 @@
             <span>输出 Token</span><strong id="metric-output">—</strong>
           </div>
           <div class="usage-card">
-            <span>上游缓存 Token</span><strong id="metric-cached">—</strong>
+            <span title="已包含在输入 Token 中">上游缓存 Token</span
+            ><strong id="metric-cached">—</strong>
           </div>
         </div>
         <p id="incomplete" class="incomplete" hidden></p>
-        <p class="field-hint">
-          已入账用量；进行中的请求结束后更新。输入已包含上游缓存 Token。
-        </p>
         <h3 class="section-title">按日用量</h3>
         <div class="table-scroll detail-table">
           <table>
@@ -268,7 +218,6 @@
         </div>
         <div class="section-heading">
           <h3 class="section-title">请求明细</h3>
-          <span class="muted">从新到旧</span>
         </div>
         <div class="table-scroll detail-table">
           <table>

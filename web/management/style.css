@@ -552,6 +552,12 @@ dialog::backdrop {
   padding: 29px;
   border-radius: 13px;
 }
+#create-form .dialog-heading {
+  margin-bottom: 24px;
+}
+.field-hint:empty {
+  display: none;
+}
 .dialog-heading {
   display: flex;
   justify-content: space-between;
@@ -827,7 +833,7 @@ input::placeholder {
     flex-wrap: wrap;
   }
   .notice code {
-    margin-left: 48px;
+    margin-left: auto;
   }
   .page-heading h1 {
     font-size: 25px;
@@ -894,8 +900,8 @@ input::placeholder {
     flex: 1;
   }
   .notice code {
-    margin-left: 44px;
-    max-width: calc(100% - 44px);
+    margin-left: 0;
+    max-width: 100%;
     overflow: auto;
   }
   .panel-heading {

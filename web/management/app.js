@@ -147,14 +147,14 @@ async function loadKeys() {
     state.offset = result.billing_timezone.utc_offset_minutes;
     renderKeys(result.items);
     message("list-error");
-    $("updated").textContent = `更新于 ${time(result.as_of)} · 已入账用量`;
+    $("updated").textContent = `更新于 ${time(result.as_of)}`;
     const sign = state.offset >= 0 ? "+" : "−";
     const hours = String(Math.floor(Math.abs(state.offset) / 60)).padStart(
       2,
       "0",
     );
     $("timezone").textContent =
-      `计费时区 UTC${sign}${hours}:${String(Math.abs(state.offset) % 60).padStart(2, "0")}`;
+      `UTC${sign}${hours}:${String(Math.abs(state.offset) % 60).padStart(2, "0")}`;
   } catch (error) {
     if (seq === state.listSequence && error.name !== "AbortError") {
       message(
@@ -210,7 +210,7 @@ $("create-form").addEventListener("submit", async (event) => {
     $("create-dialog").close();
     $("key-secret").value = result.secret;
     result.secret = null;
-    $("copy-status").textContent = "关闭后无法再次查看完整密钥。";
+    $("copy-status").textContent = "";
     $("copy-secret").textContent = "复制密钥";
     $("secret-dialog").showModal();
     state.listCursors = [null];
@@ -229,7 +229,7 @@ $("create-form").addEventListener("submit", async (event) => {
 $("copy-secret").addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText($("key-secret").value);
-    $("copy-status").textContent = "已复制，请保存到你的客户端配置。";
+    $("copy-status").textContent = "";
     $("copy-secret").textContent = "✓ 已复制";
   } catch {
     $("key-secret").focus();
